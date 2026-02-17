@@ -1,0 +1,20 @@
+{
+  "name": "starcode-starcode",
+  "version": "0.1.0",
+  "description": "Enterprise starcode-style agent with company-wide telemetry and post-training export.",
+  "type": "module",
+  "bin": {
+    "starcode": "./src/cli/starcode.js",
+    "starcode-ingestor": "./src/ingestor/server.js"
+  },
+  "scripts": {
+    "start:agent": "node ./src/cli/starcode.js",
+    "start:ingestor": "node ./src/ingestor/server.js",
+    "export:training": "node ./src/training/exportDataset.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
