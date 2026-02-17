@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import os from "node:os";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -7,6 +8,7 @@ import { TelemetryClient } from "../telemetry/telemetryClient.js";
 import { OpenAICompatibleProvider, MockProvider } from "../providers/openAICompatibleProvider.js";
 import { StarcodeAgent } from "../agent/starcodeAgent.js";
 import { LocalFileTools } from "../tools/localFileTools.js";
+import { ModelIoLogger } from "../telemetry/modelIoLogger.js";
 
 function env(name, fallback) {
   const v = process.env[name] ?? fallback;
@@ -60,10 +62,20 @@ async function main() {
   const model = process.env.MODEL_NAME ?? "gpt-4.1-mini";
   const workspaceDir = process.env.STARCODE_WORKSPACE_DIR ?? process.cwd();
   const localTools = new LocalFileTools({ baseDir: workspaceDir });
+  const modelIoDebugEnabled = process.env.STARCODE_DEBUG_MODEL_IO === "1";
+  const modelIoFilePathInput = process.env.STARCODE_DEBUG_MODEL_IO_FILE ?? ".telemetry/model-io.jsonl";
+  const modelIoFilePath = path.isAbsolute(modelIoFilePathInput)
+    ? modelIoFilePathInput
+    : path.resolve(workspaceDir, modelIoFilePathInput);
+  const modelIoLogger = new ModelIoLogger({
+    enabled: modelIoDebugEnabled,
+    filePath: modelIoFilePath
+  });
 
   const agent = new StarcodeAgent({
     provider,
     telemetry,
+    modelIoLogger,
     localTools,
     model,
     systemPrompt:
@@ -90,6 +102,9 @@ async function main() {
 
   const rl = readline.createInterface({ input, output });
   output.write("Starcode CLI (type 'exit' to quit).\n");
+  if (modelIoDebugEnabled) {
+    output.write(`model_io_debug=on file=${modelIoFilePath}\n`);
+  }
 
   while (true) {
     const rawLine = await nextLine(rl);

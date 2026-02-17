@@ -58,6 +58,14 @@ Tool workspace boundary:
 - Set `STARCODE_WORKSPACE_DIR` to limit read/write/list operations to one root directory.
 - Default is current working directory when launching the CLI.
 
+Model I/O step tracing:
+- Set `STARCODE_DEBUG_MODEL_IO=1` to record loop-level agent <> model messages and tool execution steps.
+- Optional output path: `STARCODE_DEBUG_MODEL_IO_FILE` (default `.telemetry/model-io.jsonl` under workspace root).
+- Warning: this debug log includes raw prompts/responses/tool payloads.
+- Export round-by-round markdown transcript:
+  - `npm run export:model-io`
+  - Optional env: `TRACE_ID=<trace_id> STARCODE_MODEL_IO_INPUT=<path> STARCODE_MODEL_IO_OUTPUT=<path>`
+
 4) Export post-training datasets
 
 ```bash

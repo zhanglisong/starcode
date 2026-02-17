@@ -130,15 +130,30 @@ function telemetryStub() {
   };
 }
 
+function modelIoLoggerStub() {
+  const state = {
+    events: []
+  };
+
+  return {
+    state,
+    async log(payload) {
+      state.events.push(payload);
+    }
+  };
+}
+
 test("agent executes tool calls and returns final answer", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "starcode-agent-tools-"));
   const provider = new StubProvider();
   const tools = new LocalFileTools({ baseDir: dir });
   const telemetry = telemetryStub();
+  const modelIoLogger = modelIoLoggerStub();
 
   const agent = new StarcodeAgent({
     provider,
     telemetry,
+    modelIoLogger,
     localTools: tools,
     model: "stub-model",
     systemPrompt: "You are a test agent."
@@ -159,6 +174,13 @@ test("agent executes tool calls and returns final answer", async () => {
   assert.equal(toolResults[0].name, "write_file");
   assert.equal(toolResults[0].ok, true);
   assert.equal(toolResults[0].result.path, "generated.txt");
+
+  const phases = modelIoLogger.state.events.map((event) => event.phase);
+  assert.equal(phases.includes("model_request"), true);
+  assert.equal(phases.includes("model_response"), true);
+  assert.equal(phases.includes("tool_start"), true);
+  assert.equal(phases.includes("tool_result"), true);
+  assert.equal(phases.includes("turn_end"), true);
 });
 
 test("agent preserves reasoning_content in assistant tool-call messages", async () => {

@@ -62,6 +62,7 @@ export class StarcodeAgent {
   constructor({
     provider,
     telemetry,
+    modelIoLogger,
     localTools,
     model,
     systemPrompt,
@@ -72,6 +73,7 @@ export class StarcodeAgent {
   }) {
     this.provider = provider;
     this.telemetry = telemetry;
+    this.modelIoLogger = modelIoLogger;
     this.localTools = localTools;
     this.model = model;
     this.temperature = temperature;
@@ -79,6 +81,13 @@ export class StarcodeAgent {
     this.maxTokens = maxTokens;
     this.maxToolRounds = maxToolRounds;
     this.messages = [{ role: "system", content: systemPrompt }];
+  }
+
+  async logModelIo(event) {
+    if (!this.modelIoLogger) {
+      return;
+    }
+    await this.modelIoLogger.log(event);
   }
 
   async runTurn(userText) {
@@ -97,6 +106,15 @@ export class StarcodeAgent {
       const tools = this.localTools?.getToolDefinitions?.() ?? [];
 
       for (let round = 0; round <= this.maxToolRounds; round += 1) {
+        await this.logModelIo({
+          phase: "model_request",
+          trace_id: traceId,
+          round,
+          model: this.model,
+          messages: this.messages,
+          tools
+        });
+
         const result = await this.provider.complete({
           model: this.model,
           messages: this.messages,
@@ -108,6 +126,19 @@ export class StarcodeAgent {
 
         latestUsage = result.usage ?? latestUsage;
         latestFinishReason = result.finishReason ?? latestFinishReason;
+
+        await this.logModelIo({
+          phase: "model_response",
+          trace_id: traceId,
+          round,
+          finish_reason: result.finishReason,
+          usage: result.usage,
+          message: result.message ?? {
+            role: "assistant",
+            content: normalizeContent(result.outputText)
+          },
+          tool_calls: result.toolCalls ?? []
+        });
 
         if (!result.toolCalls?.length || !this.localTools) {
           const assistantMessage = buildAssistantMessageFromResult(result, false);
@@ -124,15 +155,36 @@ export class StarcodeAgent {
           const toolName = call?.function?.name ?? "unknown";
           const parsedArguments = parseToolArguments(call?.function?.arguments);
 
+          await this.logModelIo({
+            phase: "tool_start",
+            trace_id: traceId,
+            round,
+            tool_call_id: call?.id ?? null,
+            name: toolName,
+            arguments: parsedArguments
+          });
+
           try {
             const toolResult = await this.localTools.executeToolCall(call);
+            const toolDurationMs = Date.now() - toolStartedAt;
             allToolResults.push({
               tool_call_id: call?.id ?? null,
               name: toolName,
               arguments: parsedArguments,
               ok: true,
               result: toolResult,
-              duration_ms: Date.now() - toolStartedAt
+              duration_ms: toolDurationMs
+            });
+
+            await this.logModelIo({
+              phase: "tool_result",
+              trace_id: traceId,
+              round,
+              tool_call_id: call?.id ?? null,
+              name: toolName,
+              ok: true,
+              result: toolResult,
+              duration_ms: toolDurationMs
             });
 
             this.messages.push({
@@ -141,13 +193,25 @@ export class StarcodeAgent {
               content: JSON.stringify(toolResult)
             });
           } catch (error) {
+            const toolDurationMs = Date.now() - toolStartedAt;
             allToolResults.push({
               tool_call_id: call?.id ?? null,
               name: toolName,
               arguments: parsedArguments,
               ok: false,
               error: error.message,
-              duration_ms: Date.now() - toolStartedAt
+              duration_ms: toolDurationMs
+            });
+
+            await this.logModelIo({
+              phase: "tool_result",
+              trace_id: traceId,
+              round,
+              tool_call_id: call?.id ?? null,
+              name: toolName,
+              ok: false,
+              error: error.message,
+              duration_ms: toolDurationMs
             });
 
             this.messages.push({
@@ -205,6 +269,14 @@ export class StarcodeAgent {
 
       const flush = await this.telemetry.flush();
 
+      await this.logModelIo({
+        phase: "turn_end",
+        trace_id: traceId,
+        output_text: finalAssistantText,
+        latency_ms: latencyMs,
+        usage: latestUsage
+      });
+
       return {
         traceId,
         outputText: finalAssistantText,
@@ -214,6 +286,16 @@ export class StarcodeAgent {
       };
     } catch (error) {
       const latencyMs = Date.now() - startedAt;
+
+      await this.logModelIo({
+        phase: "turn_error",
+        trace_id: traceId,
+        latency_ms: latencyMs,
+        error: {
+          name: error.name,
+          message: error.message
+        }
+      });
 
       await this.telemetry.captureModelBehavior({
         traceId,

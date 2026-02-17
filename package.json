@@ -11,6 +11,7 @@
     "start:agent": "node ./src/cli/starcode.js",
     "start:ingestor": "node ./src/ingestor/server.js",
     "export:training": "node ./src/training/exportDataset.js",
+    "export:model-io": "node ./src/debug/exportModelIoTranscript.js",
     "test": "node --test"
   },
   "engines": {
