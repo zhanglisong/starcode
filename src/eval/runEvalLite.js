@@ -5,6 +5,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { evalLiteTasks } from "./taskCatalog.js";
 import { scoreTask } from "./scoring.js";
+import { computeKpis } from "./releaseScorecard.js";
 import { StarcodeAgent } from "../agent/starcodeAgent.js";
 import { OpenAICompatibleProvider, MockProvider } from "../providers/openAICompatibleProvider.js";
 import { LocalFileTools } from "../tools/localFileTools.js";
@@ -333,7 +334,9 @@ async function updateNightlyHistory({ rootDir, report }) {
     passed_tasks: report.passed_tasks,
     pass_rate: report.pass_rate,
     latency_avg: report.latency?.avg ?? 0,
-    latency_p95: report.latency?.p95 ?? 0
+    latency_p95: report.latency?.p95 ?? 0,
+    tool_success_pct: report.kpis?.tool_success_pct ?? 0,
+    task_failure_pct: report.kpis?.task_failure_pct ?? 0
   };
 
   await fs.appendFile(historyFile, `${JSON.stringify(entry)}\n`, "utf8");
@@ -426,6 +429,10 @@ async function main() {
         toolResults
       });
 
+      const toolCallsTotal = toolResults.length;
+      const toolCallsFailed = toolResults.filter((item) => item?.ok === false).length;
+      const toolCallsSucceeded = Math.max(0, toolCallsTotal - toolCallsFailed);
+
       results.push({
         id: task.id,
         category: task.category ?? "uncategorized",
@@ -441,7 +448,10 @@ async function main() {
         passed_checks: scored.passedChecks,
         max_checks: scored.maxChecks,
         checks: scored.checks,
-        tool_calls: toolResults.length,
+        tool_calls: toolCallsTotal,
+        tool_calls_total: toolCallsTotal,
+        tool_calls_succeeded: toolCallsSucceeded,
+        tool_calls_failed: toolCallsFailed,
         error: null
       });
     } catch (error) {
@@ -461,6 +471,9 @@ async function main() {
         max_checks: task.checks?.length ?? 0,
         checks: [],
         tool_calls: 0,
+        tool_calls_total: 0,
+        tool_calls_succeeded: 0,
+        tool_calls_failed: 0,
         error: {
           name: error.name,
           message: error.message
@@ -491,6 +504,9 @@ async function main() {
     categories: categorySummary,
     tasks: results
   };
+
+  const kpis = computeKpis(report);
+  report.kpis = kpis;
 
   const jsonPath = path.join(reportDir, `${runId}.json`);
   const mdPath = path.join(reportDir, `${runId}.md`);

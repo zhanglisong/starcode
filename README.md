@@ -180,3 +180,24 @@ Current eval-lite scope:
   - Uses passed sampling params directly.
 
 You can always override endpoint with `MODEL_ENDPOINT`.
+
+## Release Gate (SC-018)
+
+After running eval-lite, enforce KPI thresholds:
+
+```bash
+npm run eval:gate
+```
+
+Default scorecard outputs:
+- `tmp/eval-lite/scorecards/latest.scorecard.json`
+- `tmp/eval-lite/scorecards/latest.scorecard.md`
+
+Gate thresholds are configurable via:
+- `STARCODE_GATE_MIN_TASK_SUCCESS_PCT`
+- `STARCODE_GATE_MIN_TOOL_SUCCESS_PCT`
+- `STARCODE_GATE_MAX_TASK_FAILURE_PCT`
+- `STARCODE_GATE_MAX_TOOL_FAILURE_PCT`
+- `STARCODE_GATE_MAX_LATENCY_P95_MS`
+
+If any threshold fails, `eval:gate` exits non-zero for CI release blocking.

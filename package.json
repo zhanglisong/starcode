@@ -13,7 +13,8 @@
     "export:training": "node ./src/training/exportDataset.js",
     "export:model-io": "node ./src/debug/exportModelIoTranscript.js",
     "test": "node --test",
-    "eval:lite": "node ./src/eval/runEvalLite.js"
+    "eval:lite": "node ./src/eval/runEvalLite.js",
+    "eval:gate": "node ./src/eval/releaseGate.js"
   },
   "engines": {
     "node": ">=20"
