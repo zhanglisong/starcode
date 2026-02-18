@@ -25,6 +25,8 @@ It supports company-wide aggregation across many engineers and exports post-trai
 - Secret/PII redaction before persistence/upload.
 - Durable local spool (`.telemetry/events.jsonl`) for offline reliability.
 - Batch flush to central ingestion service.
+- Retry with exponential backoff for temporary outages (events stay queued until successful delivery).
+- Delivery metrics exposed on flush (`queued`, `sent`, `failed`).
 
 3. Ingestor (`/Users/huizhang/code/starcode/src/ingestor/server.js`)
 - HTTP service accepting `POST /v1/events`.
@@ -103,6 +105,7 @@ Outputs:
 ## Security and Compliance Controls
 
 - Telemetry redaction is enabled by default (`TELEMETRY_REDACT=true`).
+- Retry/backoff settings are configurable via `TELEMETRY_RETRY_BASE_MS`, `TELEMETRY_RETRY_MAX_MS`, `TELEMETRY_RETRY_MULTIPLIER`.
 - API-key enforcement is configurable in ingestor (`INGEST_API_KEYS`).
 - Data is stored in JSONL for auditability and deterministic exports.
 - Add your own legal/compliance policy gates before using export data for post-training.

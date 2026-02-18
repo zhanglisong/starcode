@@ -3,6 +3,15 @@ import { createTelemetryEvent } from "./eventSchema.js";
 import { redactSensitiveData } from "./redaction.js";
 import { SpoolStore } from "./spoolStore.js";
 
+function clampNumber(value, fallback, min, max) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.max(min, Math.min(max, parsed));
+}
+
 export class TelemetryClient {
   constructor({
     endpoint,
@@ -15,7 +24,10 @@ export class TelemetryClient {
     spoolDir = ".telemetry",
     flushBatchSize = 100,
     timeoutMs = 5000,
-    redact = true
+    redact = true,
+    retryBaseMs = 1000,
+    retryMaxMs = 30000,
+    retryMultiplier = 2
   }) {
     this.endpoint = endpoint?.replace(/\/$/, "") ?? "";
     this.apiKey = apiKey ?? "";
@@ -28,10 +40,25 @@ export class TelemetryClient {
     this.flushBatchSize = flushBatchSize;
     this.timeoutMs = timeoutMs;
     this.redact = redact;
+
+    this.retryBaseMs = clampNumber(retryBaseMs, 1000, 100, 120000);
+    this.retryMaxMs = clampNumber(retryMaxMs, 30000, 100, 300000);
+    this.retryMultiplier = clampNumber(retryMultiplier, 2, 1.2, 10);
+
+    this.sentCount = 0;
+    this.failedCount = 0;
+    this.consecutiveFailures = 0;
+    this.nextRetryAt = 0;
+    this.lastError = null;
+    this.lastFlushAt = null;
   }
 
   payload(value) {
     return this.redact ? redactSensitiveData(value) : value;
+  }
+
+  async queueEvent(event) {
+    await this.spool.append(event);
   }
 
   async captureSessionMeta({ traceId, mode, git, machine }) {
@@ -46,7 +73,7 @@ export class TelemetryClient {
       payload: this.payload({ mode, git, machine })
     });
 
-    await this.spool.append(event);
+    await this.queueEvent(event);
   }
 
   async captureConversationTurn({
@@ -82,7 +109,7 @@ export class TelemetryClient {
       })
     });
 
-    await this.spool.append(event);
+    await this.queueEvent(event);
   }
 
   async captureModelBehavior({
@@ -124,17 +151,60 @@ export class TelemetryClient {
       })
     });
 
-    await this.spool.append(event);
+    await this.queueEvent(event);
+  }
+
+  computeBackoffDelayMs() {
+    const exponent = Math.max(0, this.consecutiveFailures - 1);
+    const candidate = this.retryBaseMs * this.retryMultiplier ** exponent;
+    return Math.round(Math.min(this.retryMaxMs, candidate));
+  }
+
+  async deliveryMetrics() {
+    const queued = await this.spool.size();
+
+    return {
+      queued,
+      sent: this.sentCount,
+      failed: this.failedCount,
+      consecutive_failures: this.consecutiveFailures,
+      next_retry_at: this.nextRetryAt > 0 ? new Date(this.nextRetryAt).toISOString() : null,
+      last_error: this.lastError,
+      last_flush_at: this.lastFlushAt
+    };
   }
 
   async flush(limit = this.flushBatchSize) {
+    this.lastFlushAt = new Date().toISOString();
+
     if (!this.endpoint) {
-      return { flushed: 0, skipped: true, reason: "TELEMETRY_ENDPOINT not set" };
+      return {
+        flushed: 0,
+        skipped: true,
+        reason: "TELEMETRY_ENDPOINT not set",
+        metrics: await this.deliveryMetrics()
+      };
+    }
+
+    const now = Date.now();
+    if (this.nextRetryAt && now < this.nextRetryAt) {
+      return {
+        flushed: 0,
+        skipped: true,
+        reason: "retry backoff active",
+        retry_after_ms: this.nextRetryAt - now,
+        metrics: await this.deliveryMetrics()
+      };
     }
 
     const events = await this.spool.readBatch(limit);
     if (!events.length) {
-      return { flushed: 0, skipped: true, reason: "No events" };
+      return {
+        flushed: 0,
+        skipped: true,
+        reason: "No events",
+        metrics: await this.deliveryMetrics()
+      };
     }
 
     const abortController = new AbortController();
@@ -153,17 +223,46 @@ export class TelemetryClient {
 
       if (!response.ok) {
         const body = await response.text();
+        this.consecutiveFailures += 1;
+        this.failedCount += events.length;
+        this.lastError = `ingestion rejected: ${response.status} ${body}`;
+        const delay = this.computeBackoffDelayMs();
+        this.nextRetryAt = Date.now() + delay;
+
         return {
           flushed: 0,
           skipped: false,
-          reason: `ingestion rejected: ${response.status} ${body}`
+          reason: this.lastError,
+          retry_after_ms: delay,
+          metrics: await this.deliveryMetrics()
         };
       }
 
       await this.spool.ack(events.map((event) => event.event_id));
-      return { flushed: events.length, skipped: false };
+      this.sentCount += events.length;
+      this.consecutiveFailures = 0;
+      this.nextRetryAt = 0;
+      this.lastError = null;
+
+      return {
+        flushed: events.length,
+        skipped: false,
+        metrics: await this.deliveryMetrics()
+      };
     } catch (error) {
-      return { flushed: 0, skipped: false, reason: error.message };
+      this.consecutiveFailures += 1;
+      this.failedCount += events.length;
+      this.lastError = error.message;
+      const delay = this.computeBackoffDelayMs();
+      this.nextRetryAt = Date.now() + delay;
+
+      return {
+        flushed: 0,
+        skipped: false,
+        reason: error.message,
+        retry_after_ms: delay,
+        metrics: await this.deliveryMetrics()
+      };
     } finally {
       clearTimeout(timeout);
     }

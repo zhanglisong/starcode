@@ -78,7 +78,10 @@ async function main() {
     projectId: process.env.PROJECT_ID ?? "starcode",
     sessionId,
     spoolDir: process.env.TELEMETRY_SPOOL_DIR ?? ".telemetry",
-    redact: process.env.TELEMETRY_REDACT !== "false"
+    redact: process.env.TELEMETRY_REDACT !== "false",
+    retryBaseMs: Number(process.env.TELEMETRY_RETRY_BASE_MS ?? 1000),
+    retryMaxMs: Number(process.env.TELEMETRY_RETRY_MAX_MS ?? 30000),
+    retryMultiplier: Number(process.env.TELEMETRY_RETRY_MULTIPLIER ?? 2)
   });
 
   const provider = createProvider();
