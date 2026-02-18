@@ -110,6 +110,147 @@ class ReasoningAwareProvider {
   }
 }
 
+class MultiRoundProvider {
+  constructor() {
+    this.providerName = "multi-round";
+    this.calls = 0;
+  }
+
+  async complete() {
+    this.calls += 1;
+
+    if (this.calls <= 3) {
+      const content = this.calls === 1 ? "a" : this.calls === 2 ? "b" : "c";
+      return {
+        outputText: "",
+        message: {
+          role: "assistant",
+          content: ""
+        },
+        finishReason: "tool_calls",
+        toolCalls: [
+          {
+            id: `chain_${this.calls}`,
+            type: "function",
+            function: {
+              name: "write_file",
+              arguments: JSON.stringify({
+                path: "chain.txt",
+                content,
+                append: true
+              })
+            }
+          }
+        ],
+        usage: { total_tokens: this.calls * 10 }
+      };
+    }
+
+    return {
+      outputText: "Chain complete.",
+      message: {
+        role: "assistant",
+        content: "Chain complete."
+      },
+      finishReason: "stop",
+      toolCalls: [],
+      usage: { total_tokens: 50 }
+    };
+  }
+}
+
+class MaxRoundProvider {
+  constructor() {
+    this.providerName = "max-round";
+    this.calls = 0;
+  }
+
+  async complete() {
+    this.calls += 1;
+    return {
+      outputText: "",
+      message: {
+        role: "assistant",
+        content: ""
+      },
+      finishReason: "tool_calls",
+      toolCalls: [
+        {
+          id: `limit_${this.calls}`,
+          type: "function",
+          function: {
+            name: "write_file",
+            arguments: JSON.stringify({
+              path: "limit.txt",
+              content: String(this.calls),
+              append: true
+            })
+          }
+        }
+      ],
+      usage: { total_tokens: this.calls * 10 }
+    };
+  }
+}
+
+class DuplicateToolProvider {
+  constructor() {
+    this.providerName = "duplicate-tools";
+    this.calls = 0;
+  }
+
+  async complete() {
+    this.calls += 1;
+
+    if (this.calls === 1) {
+      const argumentsJson = JSON.stringify({
+        path: "dup.txt",
+        content: "x",
+        append: true
+      });
+
+      return {
+        outputText: "",
+        message: {
+          role: "assistant",
+          content: ""
+        },
+        finishReason: "tool_calls",
+        toolCalls: [
+          {
+            id: "dup_1",
+            type: "function",
+            function: {
+              name: "write_file",
+              arguments: argumentsJson
+            }
+          },
+          {
+            id: "dup_2",
+            type: "function",
+            function: {
+              name: "write_file",
+              arguments: argumentsJson
+            }
+          }
+        ],
+        usage: { total_tokens: 10 }
+      };
+    }
+
+    return {
+      outputText: "Done dedupe.",
+      message: {
+        role: "assistant",
+        content: "Done dedupe."
+      },
+      finishReason: "stop",
+      toolCalls: [],
+      usage: { total_tokens: 20 }
+    };
+  }
+}
+
 function telemetryStub() {
   const state = {
     conversationTurns: [],
@@ -222,4 +363,78 @@ test("agent preserves reasoning_content in assistant tool-call messages", async 
 
   const content = await fs.readFile(path.join(dir, "reasoning.txt"), "utf8");
   assert.equal(content, "reasoning-compatible");
+});
+
+test("agent supports 3+ tool rounds before final answer", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "starcode-agent-chain-"));
+  const provider = new MultiRoundProvider();
+  const tools = new LocalFileTools({ baseDir: dir });
+
+  const agent = new StarcodeAgent({
+    provider,
+    telemetry: telemetryStub(),
+    localTools: tools,
+    model: "stub-model",
+    systemPrompt: "You are a test agent.",
+    maxToolRounds: 5
+  });
+
+  const result = await agent.runTurn("run chain");
+  assert.equal(result.outputText, "Chain complete.");
+  assert.equal(provider.calls, 4);
+  assert.equal(result.latencyBreakdown.tool_rounds, 3);
+
+  const file = await fs.readFile(path.join(dir, "chain.txt"), "utf8");
+  assert.equal(file, "abc");
+});
+
+test("agent stops on max tool rounds without executing extra calls", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "starcode-agent-limit-"));
+  const provider = new MaxRoundProvider();
+  const tools = new LocalFileTools({ baseDir: dir });
+  const telemetry = telemetryStub();
+
+  const agent = new StarcodeAgent({
+    provider,
+    telemetry,
+    localTools: tools,
+    model: "stub-model",
+    systemPrompt: "You are a test agent.",
+    maxToolRounds: 1
+  });
+
+  const result = await agent.runTurn("loop forever");
+  assert.equal(result.outputText, "Tool-call round limit reached before final response.");
+  assert.equal(provider.calls, 2);
+
+  const file = await fs.readFile(path.join(dir, "limit.txt"), "utf8");
+  assert.equal(file, "1");
+
+  const toolResults = telemetry.state.conversationTurns[0].toolResults;
+  assert.equal(toolResults.length, 1);
+});
+
+test("agent deduplicates duplicate tool calls in same round", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "starcode-agent-dedupe-"));
+  const provider = new DuplicateToolProvider();
+  const tools = new LocalFileTools({ baseDir: dir });
+  const telemetry = telemetryStub();
+
+  const agent = new StarcodeAgent({
+    provider,
+    telemetry,
+    localTools: tools,
+    model: "stub-model",
+    systemPrompt: "You are a test agent."
+  });
+
+  const result = await agent.runTurn("run duplicates");
+  assert.equal(result.outputText, "Done dedupe.");
+
+  const file = await fs.readFile(path.join(dir, "dup.txt"), "utf8");
+  assert.equal(file, "x");
+
+  const toolResults = telemetry.state.conversationTurns[0].toolResults;
+  assert.equal(toolResults.length, 2);
+  assert.equal(toolResults.filter((item) => item.reused).length, 1);
 });

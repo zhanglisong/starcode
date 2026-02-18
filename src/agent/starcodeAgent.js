@@ -90,6 +90,26 @@ function createLatencyBreakdown({
   };
 }
 
+function stableStringify(value) {
+  try {
+    return JSON.stringify(value, Object.keys(value || {}).sort());
+  } catch {
+    return JSON.stringify(value);
+  }
+}
+
+function toolShapeKey(toolName, parsedArguments) {
+  return `${toolName}:${stableStringify(parsedArguments)}`;
+}
+
+function pushToolMessage(messages, toolCallId, payload) {
+  messages.push({
+    role: "tool",
+    tool_call_id: toolCallId,
+    content: JSON.stringify(payload)
+  });
+}
+
 export class StarcodeAgent {
   constructor({
     provider,
@@ -133,6 +153,7 @@ export class StarcodeAgent {
     let latestUsage = {};
     let latestFinishReason = "unknown";
     let finalAssistantText = "";
+    const executedById = new Map();
     const timing = {
       modelMs: 0,
       toolMs: 0,
@@ -191,37 +212,99 @@ export class StarcodeAgent {
 
         if (!result.toolCalls?.length || !this.localTools) {
           const assistantMessage = buildAssistantMessageFromResult(result, false);
-          finalAssistantText = assistantMessage.content;
+          finalAssistantText = assistantMessage.content || "No response text returned.";
+          if (!assistantMessage.content) {
+            assistantMessage.content = finalAssistantText;
+          }
           this.messages.push(assistantMessage);
           break;
         }
 
-        timing.toolRounds += 1;
         allToolCalls.push(...result.toolCalls);
+
+        if (round === this.maxToolRounds) {
+          latestFinishReason = "max_tool_rounds";
+          finalAssistantText = "Tool-call round limit reached before final response.";
+          this.messages.push({ role: "assistant", content: finalAssistantText });
+          break;
+        }
+
+        timing.toolRounds += 1;
         this.messages.push(buildAssistantMessageFromResult(result, true));
+
+        const executedByShapeInRound = new Map();
 
         for (const call of result.toolCalls) {
           const toolStartedAt = Date.now();
           const toolName = call?.function?.name ?? "unknown";
           const parsedArguments = parseToolArguments(call?.function?.arguments);
+          const toolCallId = call?.id ?? `tool_${randomUUID()}`;
+          const shapeKey = toolShapeKey(toolName, parsedArguments);
 
           await this.logModelIo({
             phase: "tool_start",
             trace_id: traceId,
             round,
-            tool_call_id: call?.id ?? null,
+            tool_call_id: toolCallId,
             name: toolName,
             arguments: parsedArguments
           });
 
+          const cachedById = call?.id ? executedById.get(call.id) : null;
+          const cachedByShape = executedByShapeInRound.get(shapeKey);
+          const cached = cachedById ?? cachedByShape;
+
+          if (cached) {
+            const reusedDurationMs = Date.now() - toolStartedAt;
+            allToolResults.push({
+              tool_call_id: toolCallId,
+              name: toolName,
+              arguments: parsedArguments,
+              ok: cached.ok,
+              result: cached.result,
+              error: cached.error,
+              duration_ms: reusedDurationMs,
+              reused: true,
+              duplicate_of: cached.tool_call_id
+            });
+
+            await this.logModelIo({
+              phase: "tool_result",
+              trace_id: traceId,
+              round,
+              tool_call_id: toolCallId,
+              name: toolName,
+              ok: cached.ok,
+              result: cached.result,
+              error: cached.error,
+              duration_ms: reusedDurationMs,
+              reused: true,
+              duplicate_of: cached.tool_call_id
+            });
+
+            pushToolMessage(this.messages, toolCallId, cached.tool_payload);
+            continue;
+          }
+
           try {
-            const toolResult = await this.localTools.executeToolCall(call);
+            const toolResult = await this.localTools.executeToolCall({
+              ...call,
+              id: toolCallId
+            });
             const toolDurationMs = Date.now() - toolStartedAt;
             timing.toolMs += toolDurationMs;
             timing.toolCalls += 1;
 
+            const payload = {
+              ok: true,
+              result: toolResult,
+              error: null,
+              tool_payload: toolResult,
+              tool_call_id: toolCallId
+            };
+
             allToolResults.push({
-              tool_call_id: call?.id ?? null,
+              tool_call_id: toolCallId,
               name: toolName,
               arguments: parsedArguments,
               ok: true,
@@ -233,26 +316,40 @@ export class StarcodeAgent {
               phase: "tool_result",
               trace_id: traceId,
               round,
-              tool_call_id: call?.id ?? null,
+              tool_call_id: toolCallId,
               name: toolName,
               ok: true,
               result: toolResult,
               duration_ms: toolDurationMs
             });
 
-            this.messages.push({
-              role: "tool",
-              tool_call_id: call.id,
-              content: JSON.stringify(toolResult)
-            });
+            if (call?.id) {
+              executedById.set(call.id, payload);
+            }
+            executedByShapeInRound.set(shapeKey, payload);
+
+            pushToolMessage(this.messages, toolCallId, toolResult);
           } catch (error) {
             const toolDurationMs = Date.now() - toolStartedAt;
             timing.toolMs += toolDurationMs;
             timing.toolCalls += 1;
             timing.toolFailures += 1;
 
+            const toolPayload = {
+              ok: false,
+              error: error.message
+            };
+
+            const payload = {
+              ok: false,
+              result: null,
+              error: error.message,
+              tool_payload: toolPayload,
+              tool_call_id: toolCallId
+            };
+
             allToolResults.push({
-              tool_call_id: call?.id ?? null,
+              tool_call_id: toolCallId,
               name: toolName,
               arguments: parsedArguments,
               ok: false,
@@ -264,27 +361,20 @@ export class StarcodeAgent {
               phase: "tool_result",
               trace_id: traceId,
               round,
-              tool_call_id: call?.id ?? null,
+              tool_call_id: toolCallId,
               name: toolName,
               ok: false,
               error: error.message,
               duration_ms: toolDurationMs
             });
 
-            this.messages.push({
-              role: "tool",
-              tool_call_id: call.id,
-              content: JSON.stringify({
-                ok: false,
-                error: error.message
-              })
-            });
-          }
-        }
+            if (call?.id) {
+              executedById.set(call.id, payload);
+            }
+            executedByShapeInRound.set(shapeKey, payload);
 
-        if (round === this.maxToolRounds) {
-          finalAssistantText = "Tool-call round limit reached before final response.";
-          this.messages.push({ role: "assistant", content: finalAssistantText });
+            pushToolMessage(this.messages, toolCallId, toolPayload);
+          }
         }
       }
 
