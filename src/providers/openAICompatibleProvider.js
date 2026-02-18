@@ -27,6 +27,21 @@ function shouldSendAuthorization(providerName) {
   return providerName !== "ollama";
 }
 
+function buildResultFromPayload(payload, providerMeta) {
+  const choice = payload?.choices?.[0] ?? {};
+  const msg = choice.message ?? {};
+
+  return {
+    outputText: msg.content ?? "",
+    finishReason: choice.finish_reason ?? "unknown",
+    toolCalls: msg.tool_calls ?? [],
+    message: msg,
+    usage: payload?.usage ?? {},
+    raw: payload,
+    providerMeta
+  };
+}
+
 function applyProviderConstraints({ providerName, model, temperature, topP, maxTokens }) {
   const effective = {
     temperature,
@@ -58,7 +73,28 @@ export class OpenAICompatibleProvider {
     this.sendAuthorization = shouldSendAuthorization(this.providerName);
   }
 
-  async complete({ model, messages, temperature = 0.2, topP = 1, maxTokens = 1024, tools = [] }) {
+  async complete({
+    model,
+    messages,
+    temperature = 0.2,
+    topP = 1,
+    maxTokens = 1024,
+    tools = [],
+    stream = false,
+    onDelta
+  }) {
+    if (stream) {
+      return this.completeStream({
+        model,
+        messages,
+        temperature,
+        topP,
+        maxTokens,
+        tools,
+        onDelta
+      });
+    }
+
     const effective = applyProviderConstraints({
       providerName: this.providerName,
       model,
@@ -105,16 +141,215 @@ export class OpenAICompatibleProvider {
     }
 
     const payload = await response.json();
-    const choice = payload.choices?.[0] ?? {};
-    const msg = choice.message ?? {};
+    return buildResultFromPayload(payload, {
+      provider: this.providerName,
+      endpoint: this.endpoint,
+      constraints: effective.constraints
+    });
+  }
+
+  async completeStream({ model, messages, temperature = 0.2, topP = 1, maxTokens = 1024, tools = [], onDelta }) {
+    const effective = applyProviderConstraints({
+      providerName: this.providerName,
+      model,
+      temperature,
+      topP,
+      maxTokens
+    });
+
+    const body = {
+      model,
+      messages,
+      stream: true,
+      max_tokens: effective.maxTokens
+    };
+
+    if (Number.isFinite(effective.temperature)) {
+      body.temperature = effective.temperature;
+    }
+
+    if (Number.isFinite(effective.topP)) {
+      body.top_p = effective.topP;
+    }
+
+    if (tools.length) {
+      body.tools = tools;
+    }
+
+    const headers = {
+      "content-type": "application/json"
+    };
+
+    if (this.sendAuthorization && this.apiKey) {
+      headers.authorization = `Bearer ${this.apiKey}`;
+    }
+
+    const response = await fetch(this.endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`provider response ${response.status}: ${detail}`);
+    }
+
+    const contentType = String(response.headers?.get?.("content-type") ?? "").toLowerCase();
+    if (!contentType.includes("text/event-stream")) {
+      const error = new Error(`stream unsupported: expected event-stream but got '${contentType || "unknown"}'`);
+      error.streamUnsupported = true;
+      throw error;
+    }
+
+    const reader = response.body?.getReader?.();
+    if (!reader) {
+      const error = new Error("stream unsupported: response body reader unavailable");
+      error.streamUnsupported = true;
+      throw error;
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let finishReason = "unknown";
+    let usage = {};
+    let content = "";
+    let reasoningContent = "";
+    const toolCallsByIndex = new Map();
+
+    const mergeToolCall = (fragment) => {
+      const index = Number.isInteger(fragment?.index) ? fragment.index : 0;
+      const current = toolCallsByIndex.get(index) ?? {
+        id: fragment?.id ?? `call_${index}`,
+        type: fragment?.type ?? "function",
+        function: {
+          name: "",
+          arguments: ""
+        }
+      };
+
+      if (fragment?.id) {
+        current.id = fragment.id;
+      }
+      if (fragment?.type) {
+        current.type = fragment.type;
+      }
+      if (typeof fragment?.function?.name === "string") {
+        current.function.name += fragment.function.name;
+      }
+      if (typeof fragment?.function?.arguments === "string") {
+        current.function.arguments += fragment.function.arguments;
+      }
+
+      toolCallsByIndex.set(index, current);
+    };
+
+    const emitDelta = (delta) => {
+      if (typeof onDelta === "function") {
+        onDelta(delta);
+      }
+    };
+
+    const consumeLine = (line) => {
+      const trimmed = String(line ?? "").trim();
+      if (!trimmed.startsWith("data:")) {
+        return false;
+      }
+
+      const data = trimmed.slice("data:".length).trim();
+      if (!data) {
+        return false;
+      }
+      if (data === "[DONE]") {
+        return true;
+      }
+
+      let payload;
+      try {
+        payload = JSON.parse(data);
+      } catch {
+        return false;
+      }
+
+      const choice = payload?.choices?.[0] ?? {};
+      const delta = choice?.delta ?? {};
+
+      if (typeof delta.content === "string" && delta.content) {
+        content += delta.content;
+        emitDelta({ type: "text", text: delta.content });
+      }
+      if (typeof delta.reasoning_content === "string" && delta.reasoning_content) {
+        reasoningContent += delta.reasoning_content;
+        emitDelta({ type: "reasoning", text: delta.reasoning_content });
+      }
+
+      if (Array.isArray(delta.tool_calls)) {
+        for (const fragment of delta.tool_calls) {
+          mergeToolCall(fragment);
+          emitDelta({
+            type: "tool_call_delta",
+            tool_call_index: Number.isInteger(fragment?.index) ? fragment.index : 0,
+            fragment
+          });
+        }
+      }
+
+      if (choice?.finish_reason) {
+        finishReason = choice.finish_reason;
+      }
+      if (payload?.usage) {
+        usage = payload.usage;
+      }
+
+      return false;
+    };
+
+    let streamDone = false;
+    while (!streamDone) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (consumeLine(line)) {
+          streamDone = true;
+          break;
+        }
+      }
+    }
+
+    if (buffer) {
+      consumeLine(buffer);
+    }
+
+    const toolCalls = [...toolCallsByIndex.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map((entry) => entry[1]);
+
+    const message = {
+      role: "assistant",
+      content
+    };
+
+    if (reasoningContent) {
+      message.reasoning_content = reasoningContent;
+    }
+    if (toolCalls.length) {
+      message.tool_calls = toolCalls;
+    }
 
     return {
-      outputText: msg.content ?? "",
-      finishReason: choice.finish_reason ?? "unknown",
-      toolCalls: msg.tool_calls ?? [],
-      message: msg,
-      usage: payload.usage ?? {},
-      raw: payload,
+      outputText: content,
+      finishReason,
+      toolCalls,
+      message,
+      usage,
+      raw: {
+        streaming: true
+      },
       providerMeta: {
         provider: this.providerName,
         endpoint: this.endpoint,

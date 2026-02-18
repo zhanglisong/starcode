@@ -90,6 +90,8 @@ Tool workspace boundary:
   - `STARCODE_GIT_CONTEXT_MAX_CHARS`
   - `STARCODE_GIT_CONTEXT_MAX_CHANGED_FILES`
   - `STARCODE_GIT_CONTEXT_MAX_STATUS_LINES`
+- Streaming output is enabled by default (`STARCODE_ENABLE_STREAMING=true`).
+  - If provider streaming is unsupported, Starcode falls back to non-streaming automatically.
 
 Model I/O step tracing:
 - Set `STARCODE_DEBUG_MODEL_IO=1` to record loop-level agent <> model messages and tool execution steps.

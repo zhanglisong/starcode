@@ -88,6 +88,7 @@ async function main() {
   const provider = createProvider();
   const model = process.env.MODEL_NAME ?? "gpt-4.1-mini";
   const workspaceDir = process.env.STARCODE_WORKSPACE_DIR ?? process.cwd();
+  const enableStreaming = process.env.STARCODE_ENABLE_STREAMING !== "false";
   const localTools = new LocalFileTools({
     baseDir: workspaceDir,
     enableShellTool: process.env.STARCODE_ENABLE_SHELL_TOOL !== "false",
@@ -133,7 +134,8 @@ async function main() {
       "You are Starcode, an enterprise coding agent. Use available tools for real file operations when asked to read, list, or write files.",
     temperature: Number(process.env.MODEL_TEMPERATURE ?? 0.2),
     topP: Number(process.env.MODEL_TOP_P ?? 1),
-    maxTokens: Number(process.env.MODEL_MAX_TOKENS ?? 1024)
+    maxTokens: Number(process.env.MODEL_MAX_TOKENS ?? 1024),
+    enableStreaming
   });
 
   await telemetry.captureSessionMeta({
@@ -155,6 +157,7 @@ async function main() {
   if (modelIoDebugEnabled) {
     output.write(`model_io_debug=on file=${modelIoFilePath}\n`);
   }
+  output.write(`streaming=${enableStreaming ? "on" : "off"}\n`);
   output.write("Use /help for workflow commands (/fix, /test, /explain, /commit).\n");
 
   while (true) {
@@ -189,8 +192,22 @@ async function main() {
       if (slashCommand?.kind === "command") {
         output.write(`workflow> /${slashCommand.command}${slashCommand.args ? ` ${slashCommand.args}` : ""}\n`);
       }
-      const turn = await agent.runTurn(turnInput);
-      output.write(`assistant> ${turn.outputText}\n`);
+      let streamed = false;
+      const turn = await agent.runTurn(turnInput, {
+        stream: enableStreaming,
+        onTextDelta: (chunk) => {
+          if (!streamed) {
+            output.write("assistant> ");
+            streamed = true;
+          }
+          output.write(chunk);
+        }
+      });
+      if (streamed) {
+        output.write("\n");
+      } else {
+        output.write(`assistant> ${turn.outputText}\n`);
+      }
       output.write(`trace_id=${turn.traceId} latency_ms=${turn.latencyMs} flushed=${turn.flush.flushed}\n`);
     } catch (error) {
       output.write(`error> ${error.message}\n`);

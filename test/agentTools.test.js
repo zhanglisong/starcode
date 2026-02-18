@@ -272,6 +272,65 @@ class ContextProbeProvider {
   }
 }
 
+class StreamingProvider {
+  constructor() {
+    this.providerName = "streaming";
+    this.calls = [];
+  }
+
+  async complete({ stream, onDelta }) {
+    this.calls.push(stream === true ? "stream" : "non-stream");
+
+    if (stream) {
+      onDelta?.({ type: "text", text: "Hello " });
+      onDelta?.({ type: "text", text: "stream" });
+    }
+
+    return {
+      outputText: "Hello stream",
+      message: {
+        role: "assistant",
+        content: "Hello stream"
+      },
+      finishReason: "stop",
+      toolCalls: [],
+      usage: { total_tokens: 12 },
+      raw: {
+        streaming: stream === true
+      }
+    };
+  }
+}
+
+class StreamFallbackProvider {
+  constructor() {
+    this.providerName = "stream-fallback";
+    this.calls = [];
+  }
+
+  async complete({ stream }) {
+    this.calls.push(stream === true ? "stream" : "non-stream");
+
+    if (stream) {
+      const error = new Error("stream unsupported");
+      error.streamUnsupported = true;
+      throw error;
+    }
+
+    return {
+      outputText: "Fallback response",
+      message: {
+        role: "assistant",
+        content: "Fallback response"
+      },
+      finishReason: "stop",
+      toolCalls: [],
+      usage: { total_tokens: 9 },
+      raw: {}
+    };
+  }
+}
+
 function telemetryStub() {
   const state = {
     conversationTurns: [],
@@ -511,4 +570,49 @@ test("agent continues when git context provider fails", async () => {
 
   const result = await agent.runTurn("hello");
   assert.equal(result.outputText, "Context received.");
+});
+
+test("agent emits streamed text deltas when streaming is enabled", async () => {
+  const provider = new StreamingProvider();
+  const chunks = [];
+
+  const agent = new StarcodeAgent({
+    provider,
+    telemetry: telemetryStub(),
+    localTools: null,
+    model: "stub-model",
+    systemPrompt: "You are a test agent.",
+    enableStreaming: true
+  });
+
+  const result = await agent.runTurn("stream please", {
+    stream: true,
+    onTextDelta: (text) => chunks.push(text)
+  });
+
+  assert.equal(result.outputText, "Hello stream");
+  assert.equal(chunks.join(""), "Hello stream");
+  assert.deepEqual(provider.calls, ["stream"]);
+});
+
+test("agent falls back to non-streaming mode when provider stream is unsupported", async () => {
+  const provider = new StreamFallbackProvider();
+  const modelIoLogger = modelIoLoggerStub();
+
+  const agent = new StarcodeAgent({
+    provider,
+    telemetry: telemetryStub(),
+    modelIoLogger,
+    localTools: null,
+    model: "stub-model",
+    systemPrompt: "You are a test agent.",
+    enableStreaming: true
+  });
+
+  const result = await agent.runTurn("fallback please", { stream: true });
+  assert.equal(result.outputText, "Fallback response");
+  assert.deepEqual(provider.calls, ["stream", "non-stream"]);
+
+  const fallbackEvent = modelIoLogger.state.events.find((event) => event.phase === "stream_fallback");
+  assert.equal(typeof fallbackEvent?.reason, "string");
 });

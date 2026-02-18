@@ -6,11 +6,51 @@ function okResponse(payload) {
   return {
     ok: true,
     status: 200,
+    headers: {
+      get() {
+        return "application/json";
+      }
+    },
     async json() {
       return payload;
     },
     async text() {
       return JSON.stringify(payload);
+    }
+  };
+}
+
+function streamResponse(chunks) {
+  const encoder = new TextEncoder();
+  let index = 0;
+  const body = new ReadableStream({
+    pull(controller) {
+      if (index >= chunks.length) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(encoder.encode(chunks[index]));
+      index += 1;
+    }
+  });
+
+  return {
+    ok: true,
+    status: 200,
+    headers: {
+      get(name) {
+        if (String(name).toLowerCase() === "content-type") {
+          return "text/event-stream";
+        }
+        return null;
+      }
+    },
+    body,
+    async json() {
+      throw new Error("stream response does not support json()");
+    },
+    async text() {
+      return chunks.join("");
     }
   };
 }
@@ -204,6 +244,89 @@ test("provider surfaces non-2xx responses with details", async () => {
         assert.equal(error instanceof Error, true);
         assert.match(error.message, /provider response 401/);
         assert.match(error.message, /incorrect api key/);
+        return true;
+      }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("openai-compatible parses streaming deltas and tool call fragments", async () => {
+  const originalFetch = globalThis.fetch;
+  const deltas = [];
+
+  globalThis.fetch = async () =>
+    streamResponse([
+      'data: {"choices":[{"delta":{"role":"assistant"}}]}\n',
+      'data: {"choices":[{"delta":{"content":"Hello "}}]}\n',
+      'data: {"choices":[{"delta":{"content":"world"}}]}\n',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\\"path\\":\\""}}]}}]}\n',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"README.md\\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"total_tokens":33}}\n',
+      "data: [DONE]\n"
+    ]);
+
+  try {
+    const provider = new OpenAICompatibleProvider({
+      apiKey: "sk-stream",
+      providerName: "openai-compatible",
+      endpoint: "https://example.com/v1/chat/completions"
+    });
+
+    const result = await provider.complete({
+      model: "gpt-4.1-mini",
+      messages: [{ role: "user", content: "hi" }],
+      stream: true,
+      onDelta: (delta) => deltas.push(delta)
+    });
+
+    assert.equal(result.outputText, "Hello world");
+    assert.equal(result.finishReason, "tool_calls");
+    assert.equal(result.usage.total_tokens, 33);
+    assert.equal(result.toolCalls.length, 1);
+    assert.equal(result.toolCalls[0].function.name, "read_file");
+    assert.equal(result.toolCalls[0].function.arguments, '{"path":"README.md"}');
+    assert.deepEqual(
+      deltas.filter((delta) => delta.type === "text").map((delta) => delta.text),
+      ["Hello ", "world"]
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("stream mode marks mismatch as streamUnsupported", async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async () =>
+    okResponse({
+      choices: [
+        {
+          finish_reason: "stop",
+          message: {
+            role: "assistant",
+            content: "ok"
+          }
+        }
+      ]
+    });
+
+  try {
+    const provider = new OpenAICompatibleProvider({
+      apiKey: "sk-stream",
+      providerName: "openai-compatible"
+    });
+
+    await assert.rejects(
+      () =>
+        provider.complete({
+          model: "gpt-4.1-mini",
+          messages: [{ role: "user", content: "hi" }],
+          stream: true
+        }),
+      (error) => {
+        assert.equal(error instanceof Error, true);
+        assert.equal(error.streamUnsupported, true);
         return true;
       }
     );

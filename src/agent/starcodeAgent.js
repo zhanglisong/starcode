@@ -122,7 +122,8 @@ export class StarcodeAgent {
     temperature = 0.2,
     topP = 1,
     maxTokens = 1024,
-    maxToolRounds = 5
+    maxToolRounds = 5,
+    enableStreaming = false
   }) {
     this.provider = provider;
     this.telemetry = telemetry;
@@ -134,6 +135,7 @@ export class StarcodeAgent {
     this.topP = topP;
     this.maxTokens = maxTokens;
     this.maxToolRounds = maxToolRounds;
+    this.enableStreaming = enableStreaming;
     this.messages = [{ role: "system", content: systemPrompt }];
   }
 
@@ -144,7 +146,7 @@ export class StarcodeAgent {
     await this.modelIoLogger.log(event);
   }
 
-  async runTurn(userText) {
+  async runTurn(userText, options = {}) {
     const traceId = randomUUID();
     const baseMessageCount = this.messages.length;
     const turnMessages = [...this.messages];
@@ -195,6 +197,8 @@ export class StarcodeAgent {
     turnMessages.push(userMessage);
 
     const startedAt = Date.now();
+    const streamRequested = this.enableStreaming && options?.stream === true;
+    const onTextDelta = typeof options?.onTextDelta === "function" ? options.onTextDelta : null;
     const allToolCalls = [];
     const allToolResults = [];
     let latestUsage = {};
@@ -231,6 +235,7 @@ export class StarcodeAgent {
           trace_id: traceId,
           round,
           model: this.model,
+          stream_requested: streamRequested,
           messages: turnMessages,
           tools
         });
@@ -238,15 +243,45 @@ export class StarcodeAgent {
         const modelStartedAt = Date.now();
         let result;
 
-        try {
-          result = await this.provider.complete({
+        const invokeComplete = async ({ stream }) =>
+          this.provider.complete({
             model: this.model,
             messages: turnMessages,
             temperature: this.temperature,
             topP: this.topP,
             maxTokens: this.maxTokens,
-            tools
+            tools,
+            stream,
+            onDelta: stream
+              ? (delta) => {
+                  if (delta?.type === "text" && typeof delta.text === "string" && onTextDelta) {
+                    onTextDelta(delta.text);
+                  }
+                }
+              : undefined
           });
+
+        try {
+          if (streamRequested) {
+            try {
+              result = await invokeComplete({ stream: true });
+            } catch (error) {
+              if (!error?.streamUnsupported) {
+                throw error;
+              }
+
+              await this.logModelIo({
+                phase: "stream_fallback",
+                trace_id: traceId,
+                round,
+                reason: error.message
+              });
+
+              result = await invokeComplete({ stream: false });
+            }
+          } else {
+            result = await invokeComplete({ stream: false });
+          }
         } finally {
           timing.modelCalls += 1;
           timing.modelMs += Date.now() - modelStartedAt;
@@ -266,6 +301,7 @@ export class StarcodeAgent {
             content: normalizeContent(result.outputText)
           },
           tool_calls: result.toolCalls ?? [],
+          stream_used: result?.raw?.streaming === true,
           model_latency_ms: Date.now() - modelStartedAt
         });
 
