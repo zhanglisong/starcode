@@ -29,6 +29,31 @@ function parseArgs(args) {
   };
 }
 
+function parseHeaderPairs(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return {};
+  }
+
+  const headers = {};
+  for (const token of value.split(",")) {
+    const pair = token.trim();
+    if (!pair) {
+      continue;
+    }
+    const idx = pair.indexOf(":");
+    if (idx <= 0) {
+      continue;
+    }
+    const name = pair.slice(0, idx).trim();
+    const headerValue = pair.slice(idx + 1).trim();
+    if (!name || !headerValue) {
+      continue;
+    }
+    headers[name] = headerValue;
+  }
+  return headers;
+}
+
 function resolveProvider(value) {
   return normalizeProviderName(String(value ?? "").toLowerCase() || "openai-compatible");
 }
@@ -72,6 +97,28 @@ export async function resolveRuntimeModelConfig({ env = process.env, storePath =
     endpoint,
     apiKey
   };
+}
+
+export async function resolveRuntimeMcpConfig({ env = process.env, storePath = "" } = {}) {
+  const { data } = await loadProfiles(storePath);
+  const servers = Object.entries(data?.mcp?.servers ?? {})
+    .map(([id, server]) => ({
+      id,
+      enabled: server?.enabled !== false,
+      type: String(server?.type ?? "http"),
+      endpoint: String(server?.endpoint ?? ""),
+      version: String(server?.version ?? "v1"),
+      api_key: String(server?.api_key ?? ""),
+      api_key_env: String(server?.api_key_env ?? ""),
+      headers: server?.headers && typeof server.headers === "object" ? server.headers : {}
+    }))
+    .filter((server) => server.enabled);
+
+  if (env.STARCODE_MCP_DISABLE === "true") {
+    return { servers: [] };
+  }
+
+  return { servers };
 }
 
 async function handleAuthLogin(args, { output, env, storePath }) {
@@ -239,6 +286,130 @@ export async function runModelsCommand(args, options) {
   throw new Error(`Unknown models subcommand '${subcommand}'. Use: list | use`);
 }
 
+async function handleMcpList({ output, storePath }) {
+  const { path: resolvedPath, data } = await loadProfiles(storePath);
+  const servers = Object.entries(data?.mcp?.servers ?? {}).sort((a, b) => a[0].localeCompare(b[0]));
+
+  print(output, `profile_path=${resolvedPath}`);
+  print(output, `mcp_servers=${servers.length}`);
+
+  if (!servers.length) {
+    print(output, "servers=(none)");
+    return;
+  }
+
+  for (const [id, server] of servers) {
+    print(
+      output,
+      `- ${id} enabled=${server?.enabled !== false} type=${server?.type ?? "http"} endpoint=${server?.endpoint ?? ""} version=${server?.version ?? "v1"}`
+    );
+  }
+}
+
+async function handleMcpAdd(args, { output, storePath }) {
+  const { positionals, flags } = parseArgs(args);
+  const id = String(positionals[0] ?? "").trim();
+  if (!id) {
+    throw new Error("Missing MCP server id. Usage: starcode mcp add <id> --endpoint <url>");
+  }
+
+  const endpoint = String(flags.endpoint ?? "").trim();
+  if (!endpoint) {
+    throw new Error("Missing --endpoint for MCP server.");
+  }
+
+  const { path: resolvedPath, data } = await loadProfiles(storePath);
+  const previous = data?.mcp?.servers?.[id] ?? {};
+  const headers = {
+    ...(previous.headers && typeof previous.headers === "object" ? previous.headers : {}),
+    ...parseHeaderPairs(String(flags.header ?? ""))
+  };
+
+  data.mcp = data.mcp && typeof data.mcp === "object" ? data.mcp : { servers: {} };
+  data.mcp.servers = data.mcp.servers && typeof data.mcp.servers === "object" ? data.mcp.servers : {};
+  data.mcp.servers[id] = {
+    id,
+    type: String(flags.type ?? previous.type ?? "http"),
+    endpoint,
+    enabled: flags.disabled ? false : true,
+    version: String(flags.version ?? previous.version ?? "v1"),
+    api_key: String(flags["api-key"] ?? previous.api_key ?? ""),
+    api_key_env: String(flags["api-key-env"] ?? previous.api_key_env ?? ""),
+    headers
+  };
+
+  await saveProfiles(data, resolvedPath);
+
+  print(output, `mcp add ok id=${id}`);
+  print(output, `endpoint=${endpoint}`);
+  print(output, `enabled=${data.mcp.servers[id].enabled}`);
+  print(output, `profile_path=${resolvedPath}`);
+}
+
+async function handleMcpRemove(args, { output, storePath }) {
+  const { positionals } = parseArgs(args);
+  const id = String(positionals[0] ?? "").trim();
+  if (!id) {
+    throw new Error("Missing MCP server id. Usage: starcode mcp remove <id>");
+  }
+
+  const { path: resolvedPath, data } = await loadProfiles(storePath);
+  if (!data?.mcp?.servers?.[id]) {
+    throw new Error(`MCP server '${id}' not found.`);
+  }
+
+  delete data.mcp.servers[id];
+  await saveProfiles(data, resolvedPath);
+  print(output, `mcp remove ok id=${id}`);
+  print(output, `profile_path=${resolvedPath}`);
+}
+
+async function handleMcpToggle(args, { output, storePath }, enabled) {
+  const { positionals } = parseArgs(args);
+  const id = String(positionals[0] ?? "").trim();
+  if (!id) {
+    throw new Error(`Missing MCP server id. Usage: starcode mcp ${enabled ? "enable" : "disable"} <id>`);
+  }
+
+  const { path: resolvedPath, data } = await loadProfiles(storePath);
+  if (!data?.mcp?.servers?.[id]) {
+    throw new Error(`MCP server '${id}' not found.`);
+  }
+
+  data.mcp.servers[id].enabled = enabled;
+  await saveProfiles(data, resolvedPath);
+  print(output, `mcp ${enabled ? "enable" : "disable"} ok id=${id}`);
+  print(output, `profile_path=${resolvedPath}`);
+}
+
+export async function runMcpCommand(args, options) {
+  const [subcommand = "list", ...rest] = args;
+  const normalized = String(subcommand).toLowerCase();
+
+  if (normalized === "list") {
+    await handleMcpList(options);
+    return;
+  }
+  if (normalized === "add") {
+    await handleMcpAdd(rest, options);
+    return;
+  }
+  if (normalized === "remove") {
+    await handleMcpRemove(rest, options);
+    return;
+  }
+  if (normalized === "enable") {
+    await handleMcpToggle(rest, options, true);
+    return;
+  }
+  if (normalized === "disable") {
+    await handleMcpToggle(rest, options, false);
+    return;
+  }
+
+  throw new Error(`Unknown mcp subcommand '${subcommand}'. Use: list | add | remove | enable | disable`);
+}
+
 export async function runProviderUtilityCommand({
   argv,
   output = process.stdout,
@@ -263,6 +434,11 @@ export async function runProviderUtilityCommand({
 
   if (command === "models") {
     await runModelsCommand(rest, options);
+    return true;
+  }
+
+  if (command === "mcp") {
+    await runMcpCommand(rest, options);
     return true;
   }
 

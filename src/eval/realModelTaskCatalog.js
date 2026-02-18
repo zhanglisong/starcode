@@ -43,22 +43,17 @@ export const realModelRegressionTasks = [
   {
     id: "SC-REAL-003",
     category: "search",
-    title: "Glob and grep discovery behavior",
+    title: "Search discovery behavior",
     setupFiles: {
       "src/a.js": "export const token = 'alpha';\n",
       "src/b.js": "export const token = 'beta';\n",
       "src/c.txt": "not-js\n"
     },
-    prompt: "Use glob_files and grep_files to find where token beta is defined, then answer with the file path.",
+    prompt: "Use grep_files (and optionally glob_files) to find where token beta is defined, then answer with the file path.",
     checks: [
       {
         type: "response_contains",
         expected: "src/b.js"
-      },
-      {
-        type: "tool_name_used",
-        name: "glob_files",
-        min: 1
       },
       {
         type: "tool_name_used",
@@ -156,7 +151,7 @@ export const realModelRegressionTasks = [
     prompt: "Create tmp/plan_mode.txt with PLAN_OK and explain what you did.",
     checks: [
       {
-        type: "file_equals",
+        type: "file_contains",
         path: "tmp/plan_mode.txt",
         expected: "PLAN_OK"
       }

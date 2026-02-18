@@ -355,6 +355,105 @@ class EchoHistoryProvider {
   }
 }
 
+class RepeatedToolProvider {
+  constructor() {
+    this.providerName = "repeated-tool";
+    this.callCount = 0;
+  }
+
+  async complete() {
+    this.callCount += 1;
+
+    if (this.callCount % 2 === 1) {
+      const turnIndex = Math.ceil(this.callCount / 2);
+      return {
+        outputText: "",
+        message: {
+          role: "assistant",
+          content: ""
+        },
+        finishReason: "tool_calls",
+        toolCalls: [
+          {
+            id: `tool_turn_${turnIndex}`,
+            type: "function",
+            function: {
+              name: "write_file",
+              arguments: JSON.stringify({
+                path: `out/turn-${turnIndex}.txt`,
+                content: `turn-${turnIndex}`
+              })
+            }
+          }
+        ],
+        usage: { total_tokens: 10 }
+      };
+    }
+
+    return {
+      outputText: "done",
+      message: {
+        role: "assistant",
+        content: "done"
+      },
+      finishReason: "stop",
+      toolCalls: [],
+      usage: { total_tokens: 12 }
+    };
+  }
+}
+
+class McpBridgeProvider {
+  constructor() {
+    this.providerName = "mcp-bridge";
+    this.calls = 0;
+  }
+
+  async complete({ messages, tools }) {
+    this.calls += 1;
+
+    if (this.calls === 1) {
+      return {
+        outputText: "",
+        message: {
+          role: "assistant",
+          content: ""
+        },
+        finishReason: "tool_calls",
+        toolCalls: [
+          {
+            id: "mcp_call_1",
+            type: "function",
+            function: {
+              name: "mcp__demo__echo",
+              arguments: JSON.stringify({
+                text: "mcp-ok"
+              })
+            }
+          }
+        ],
+        usage: { total_tokens: 20 }
+      };
+    }
+
+    const hasToolResponse = messages.some((message) => message.role === "tool");
+    if (!hasToolResponse || !tools.some((tool) => tool?.function?.name === "mcp__demo__echo")) {
+      throw new Error("MCP bridge did not receive expected tool wiring");
+    }
+
+    return {
+      outputText: "MCP done.",
+      message: {
+        role: "assistant",
+        content: "MCP done."
+      },
+      finishReason: "stop",
+      toolCalls: [],
+      usage: { total_tokens: 12 }
+    };
+  }
+}
+
 function telemetryStub() {
   const state = {
     conversationTurns: [],
@@ -747,4 +846,108 @@ test("agent records prompt/tool contract versions in telemetry and model I/O log
   const modelRequest = modelIoLogger.state.events.find((event) => event.phase === "model_request");
   assert.equal(modelRequest.prompt_version, "v2");
   assert.equal(modelRequest.tool_schema_version, "v2");
+});
+
+test("session compaction removes tool scaffolding to avoid orphan tool_call_id history", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "starcode-agent-summary-tools-"));
+  const provider = new RepeatedToolProvider();
+  const tools = new LocalFileTools({ baseDir: dir });
+
+  const agent = new StarcodeAgent({
+    provider,
+    telemetry: telemetryStub(),
+    localTools: tools,
+    model: "stub-model",
+    systemPrompt: "You are a test agent.",
+    enableSessionSummary: true,
+    sessionSummaryTriggerMessages: 4,
+    sessionSummaryKeepRecent: 2
+  });
+
+  await agent.runTurn("turn one");
+  await agent.runTurn("turn two");
+  await agent.runTurn("turn three");
+
+  assert.equal(agent.messages.some((message) => message.role === "tool"), false);
+  assert.equal(
+    agent.messages.some((message) => message.role === "assistant" && Array.isArray(message.tool_calls)),
+    false
+  );
+});
+
+test("agent discovers MCP tools and records MCP metadata on tool execution", async () => {
+  const provider = new McpBridgeProvider();
+  const telemetry = telemetryStub();
+  const modelIoLogger = modelIoLoggerStub();
+  const mcpManager = {
+    isEnabled() {
+      return true;
+    },
+    async discover() {
+      return {
+        servers: [
+          {
+            id: "demo",
+            version: "v1",
+            tools: [{ name: "echo" }],
+            resources: [],
+            prompts: []
+          }
+        ],
+        errors: [],
+        toolDefinitions: [
+          {
+            type: "function",
+            function: {
+              name: "mcp__demo__echo",
+              description: "Echo text",
+              parameters: {
+                type: "object",
+                properties: {
+                  text: { type: "string" }
+                },
+                required: ["text"]
+              }
+            }
+          }
+        ],
+        contextText: "MCP Runtime Context:\n- server demo@v1: tools=1 resources=0 prompts=0"
+      };
+    },
+    async executeToolCall(call) {
+      return {
+        result: {
+          ok: true,
+          echoed: JSON.parse(call.function.arguments).text
+        },
+        meta: {
+          mcp_server_id: "demo",
+          mcp_server_version: "v1",
+          mcp_tool_name: "echo"
+        }
+      };
+    }
+  };
+
+  const agent = new StarcodeAgent({
+    provider,
+    telemetry,
+    modelIoLogger,
+    mcpManager,
+    localTools: null,
+    model: "stub-model",
+    systemPrompt: "You are a test agent."
+  });
+
+  const result = await agent.runTurn("test mcp");
+  assert.equal(result.outputText, "MCP done.");
+
+  const toolResults = telemetry.state.conversationTurns[0].toolResults;
+  assert.equal(toolResults.length, 1);
+  assert.equal(toolResults[0].mcp_server_id, "demo");
+  assert.equal(toolResults[0].mcp_server_version, "v1");
+  assert.equal(toolResults[0].mcp_tool_name, "echo");
+
+  const mcpDiscoveryEvent = modelIoLogger.state.events.find((event) => event.phase === "mcp_discovery");
+  assert.equal(Boolean(mcpDiscoveryEvent), true);
 });

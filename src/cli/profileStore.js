@@ -13,6 +13,9 @@ function emptyProfile() {
     defaults: {
       provider: "",
       model: ""
+    },
+    mcp: {
+      servers: {}
     }
   };
 }
@@ -45,7 +48,13 @@ export async function loadProfiles(storePathInput = "") {
                 provider: String(parsed.defaults.provider ?? ""),
                 model: String(parsed.defaults.model ?? "")
               }
-            : { provider: "", model: "" }
+            : { provider: "", model: "" },
+        mcp:
+          parsed?.mcp && typeof parsed.mcp === "object"
+            ? {
+                servers: parsed.mcp?.servers && typeof parsed.mcp.servers === "object" ? parsed.mcp.servers : {}
+              }
+            : { servers: {} }
       }
     };
   } catch (error) {

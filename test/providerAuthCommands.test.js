@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { resolveRuntimeModelConfig, runProviderUtilityCommand } from "../src/cli/providerAuthCommands.js";
+import { resolveRuntimeMcpConfig, resolveRuntimeModelConfig, runProviderUtilityCommand } from "../src/cli/providerAuthCommands.js";
 
 function outputBuffer() {
   let text = "";
@@ -122,4 +122,81 @@ test("runProviderUtilityCommand returns false for non-utility command", async ()
     env: {}
   });
   assert.equal(handled, false);
+});
+
+test("mcp add/list/disable/enable/remove flow persists MCP server config", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "starcode-mcp-cmds-"));
+  const storePath = path.join(root, "profiles.json");
+
+  const addOut = outputBuffer();
+  await runProviderUtilityCommand({
+    argv: [
+      "mcp",
+      "add",
+      "demo",
+      "--endpoint",
+      "http://127.0.0.1:9011",
+      "--header",
+      "x-api-key:${DEMO_KEY}",
+      "--api-key-env",
+      "DEMO_KEY",
+      "--version",
+      "2026-02"
+    ],
+    output: addOut.writer,
+    env: {
+      DEMO_KEY: "abc123"
+    },
+    storePath
+  });
+  assert.match(addOut.read(), /mcp add ok id=demo/);
+
+  const listOut = outputBuffer();
+  await runProviderUtilityCommand({
+    argv: ["mcp", "list"],
+    output: listOut.writer,
+    env: {},
+    storePath
+  });
+  assert.match(listOut.read(), /mcp_servers=1/);
+  assert.match(listOut.read(), /demo enabled=true type=http endpoint=http:\/\/127.0.0.1:9011 version=2026-02/);
+
+  const disableOut = outputBuffer();
+  await runProviderUtilityCommand({
+    argv: ["mcp", "disable", "demo"],
+    output: disableOut.writer,
+    env: {},
+    storePath
+  });
+  assert.match(disableOut.read(), /mcp disable ok id=demo/);
+
+  const runtimeDisabled = await resolveRuntimeMcpConfig({
+    env: {},
+    storePath
+  });
+  assert.equal(runtimeDisabled.servers.length, 0);
+
+  await runProviderUtilityCommand({
+    argv: ["mcp", "enable", "demo"],
+    output: outputBuffer().writer,
+    env: {},
+    storePath
+  });
+
+  const runtime = await resolveRuntimeMcpConfig({
+    env: {},
+    storePath
+  });
+  assert.equal(runtime.servers.length, 1);
+  assert.equal(runtime.servers[0].id, "demo");
+  assert.equal(runtime.servers[0].api_key_env, "DEMO_KEY");
+
+  const removeOut = outputBuffer();
+  await runProviderUtilityCommand({
+    argv: ["mcp", "remove", "demo"],
+    output: removeOut.writer,
+    env: {},
+    storePath
+  });
+  assert.match(removeOut.read(), /mcp remove ok id=demo/);
 });

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { parseMcpToolName } from "../mcp/mcpManager.js";
 
 function normalizeContent(content) {
   if (typeof content === "string") {
@@ -140,6 +141,22 @@ function summarizeOlderMessages(messages) {
   return lines.join("\n");
 }
 
+function isToolScaffoldMessage(message) {
+  if (!message || typeof message !== "object") {
+    return false;
+  }
+
+  if (message.role === "tool") {
+    return true;
+  }
+
+  if (message.role === "assistant" && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+    return true;
+  }
+
+  return false;
+}
+
 function buildExecutionPlan(userText) {
   const normalized = String(userText ?? "").trim();
   const splitCandidates = normalized
@@ -207,6 +224,7 @@ export class StarcodeAgent {
     telemetry,
     modelIoLogger,
     gitContextProvider,
+    mcpManager,
     localTools,
     model,
     systemPrompt,
@@ -226,6 +244,7 @@ export class StarcodeAgent {
     this.telemetry = telemetry;
     this.modelIoLogger = modelIoLogger;
     this.gitContextProvider = gitContextProvider;
+    this.mcpManager = mcpManager;
     this.localTools = localTools;
     this.model = model;
     this.promptVersion = promptVersion;
@@ -257,16 +276,17 @@ export class StarcodeAgent {
 
     const systemPrompt = this.messages[0];
     const history = this.messages.slice(1).filter((message) => !isSessionSummaryMessage(message));
+    const stableHistory = history.filter((message) => !isToolScaffoldMessage(message));
     const trigger = Math.max(1, Number(this.sessionSummaryTriggerMessages) || 18);
     const keepRecent = Math.max(1, Number(this.sessionSummaryKeepRecent) || 8);
 
-    if (history.length <= trigger) {
+    if (stableHistory.length <= trigger) {
       return null;
     }
 
-    const splitIndex = Math.max(0, history.length - keepRecent);
-    const older = history.slice(0, splitIndex);
-    const recent = history.slice(splitIndex);
+    const splitIndex = Math.max(0, stableHistory.length - keepRecent);
+    const older = stableHistory.slice(0, splitIndex);
+    const recent = stableHistory.slice(splitIndex);
     const olderSummary = summarizeOlderMessages(older);
 
     if (!olderSummary) {
@@ -297,7 +317,7 @@ export class StarcodeAgent {
     ];
 
     return {
-      history_messages: history.length,
+      history_messages: stableHistory.length,
       compressed_messages: older.length,
       summary_lines: boundedSummary ? boundedSummary.split("\n").length : 0
     };
@@ -308,7 +328,8 @@ export class StarcodeAgent {
     const baseMessageCount = this.messages.length;
     const turnMessages = [...this.messages];
     let gitContext = null;
-    let hasContextMessage = false;
+    let contextMessageCount = 0;
+    let mcpSnapshot = null;
     let persistedTurnMessages = false;
 
     if (this.gitContextProvider) {
@@ -331,7 +352,7 @@ export class StarcodeAgent {
         role: "system",
         content: gitContext.content
       });
-      hasContextMessage = true;
+      contextMessageCount += 1;
 
       await this.logModelIo({
         phase: "git_context",
@@ -348,6 +369,41 @@ export class StarcodeAgent {
         source: "git",
         skipped: true
       });
+    }
+
+    if (this.mcpManager?.isEnabled?.()) {
+      try {
+        mcpSnapshot = await this.mcpManager.discover();
+        await this.logModelIo({
+          phase: "mcp_discovery",
+          trace_id: traceId,
+          servers: mcpSnapshot.servers?.map((server) => ({
+            id: server.id,
+            version: server.version,
+            tools: server.tools?.length ?? 0,
+            resources: server.resources?.length ?? 0,
+            prompts: server.prompts?.length ?? 0
+          })),
+          errors: mcpSnapshot.errors ?? []
+        });
+
+        if (mcpSnapshot.contextText) {
+          turnMessages.push({
+            role: "system",
+            content: mcpSnapshot.contextText
+          });
+          contextMessageCount += 1;
+        }
+      } catch (error) {
+        await this.logModelIo({
+          phase: "mcp_discovery_error",
+          trace_id: traceId,
+          error: {
+            name: error.name,
+            message: error.message
+          }
+        });
+      }
     }
 
     const planningRequested = this.enablePlanningMode && options?.planning !== false;
@@ -390,11 +446,24 @@ export class StarcodeAgent {
       toolRounds: 0
     };
 
+    const resolveSessionSummaryState = (currentUpdate) => {
+      if (currentUpdate) {
+        return currentUpdate;
+      }
+      if (!this.sessionSummary) {
+        return null;
+      }
+      return {
+        summary_lines: this.sessionSummary.split("\n").filter(Boolean).length,
+        reused: true
+      };
+    };
+
     const persistTurnMessages = () => {
       if (persistedTurnMessages) {
         return;
       }
-      const skipCount = baseMessageCount + (hasContextMessage ? 1 : 0);
+      const skipCount = baseMessageCount + contextMessageCount;
       const newMessages = turnMessages.slice(skipCount);
       if (newMessages.length) {
         this.messages.push(...newMessages);
@@ -403,8 +472,9 @@ export class StarcodeAgent {
     };
 
     try {
-      const rawTools = this.localTools?.getToolDefinitions?.() ?? [];
-      const tools = applyToolSchemaVersion(rawTools, this.toolSchemaVersion);
+      const rawLocalTools = this.localTools?.getToolDefinitions?.() ?? [];
+      const rawMcpTools = mcpSnapshot?.toolDefinitions ?? [];
+      const tools = applyToolSchemaVersion([...rawLocalTools, ...rawMcpTools], this.toolSchemaVersion);
 
       for (let round = 0; round <= this.maxToolRounds; round += 1) {
         await this.logModelIo({
@@ -484,7 +554,7 @@ export class StarcodeAgent {
           model_latency_ms: Date.now() - modelStartedAt
         });
 
-        if (!result.toolCalls?.length || !this.localTools) {
+        if (!result.toolCalls?.length || (!this.localTools && !this.mcpManager)) {
           const assistantMessage = buildAssistantMessageFromResult(result, false);
           finalAssistantText = assistantMessage.content || "No response text returned.";
           if (!assistantMessage.content) {
@@ -514,6 +584,7 @@ export class StarcodeAgent {
           const parsedArguments = parseToolArguments(call?.function?.arguments);
           const toolCallId = call?.id ?? `tool_${randomUUID()}`;
           const shapeKey = toolShapeKey(toolName, parsedArguments);
+          const parsedMcp = parseMcpToolName(toolName);
 
           await this.logModelIo({
             phase: "tool_start",
@@ -539,7 +610,8 @@ export class StarcodeAgent {
               error: cached.error,
               duration_ms: reusedDurationMs,
               reused: true,
-              duplicate_of: cached.tool_call_id
+              duplicate_of: cached.tool_call_id,
+              ...(cached.meta ?? {})
             });
 
             await this.logModelIo({
@@ -553,7 +625,8 @@ export class StarcodeAgent {
               error: cached.error,
               duration_ms: reusedDurationMs,
               reused: true,
-              duplicate_of: cached.tool_call_id
+              duplicate_of: cached.tool_call_id,
+              ...(cached.meta ?? {})
             });
 
             pushToolMessage(turnMessages, toolCallId, cached.tool_payload);
@@ -561,10 +634,24 @@ export class StarcodeAgent {
           }
 
           try {
-            const toolResult = await this.localTools.executeToolCall({
-              ...call,
-              id: toolCallId
-            });
+            let toolResult;
+            let toolMeta = null;
+
+            if (parsedMcp && this.mcpManager) {
+              const mcpExecution = await this.mcpManager.executeToolCall({
+                ...call,
+                id: toolCallId
+              });
+              toolResult = mcpExecution.result;
+              toolMeta = mcpExecution.meta;
+            } else if (this.localTools) {
+              toolResult = await this.localTools.executeToolCall({
+                ...call,
+                id: toolCallId
+              });
+            } else {
+              throw new Error(`No tool executor configured for ${toolName}`);
+            }
             const toolDurationMs = Date.now() - toolStartedAt;
             timing.toolMs += toolDurationMs;
             timing.toolCalls += 1;
@@ -574,7 +661,8 @@ export class StarcodeAgent {
               result: toolResult,
               error: null,
               tool_payload: toolResult,
-              tool_call_id: toolCallId
+              tool_call_id: toolCallId,
+              meta: toolMeta
             };
 
             allToolResults.push({
@@ -583,7 +671,8 @@ export class StarcodeAgent {
               arguments: parsedArguments,
               ok: true,
               result: toolResult,
-              duration_ms: toolDurationMs
+              duration_ms: toolDurationMs,
+              ...(toolMeta ?? {})
             });
 
             await this.logModelIo({
@@ -594,7 +683,8 @@ export class StarcodeAgent {
               name: toolName,
               ok: true,
               result: toolResult,
-              duration_ms: toolDurationMs
+              duration_ms: toolDurationMs,
+              ...(toolMeta ?? {})
             });
 
             if (call?.id) {
@@ -619,7 +709,13 @@ export class StarcodeAgent {
               result: null,
               error: error.message,
               tool_payload: toolPayload,
-              tool_call_id: toolCallId
+              tool_call_id: toolCallId,
+              meta: parsedMcp
+                ? {
+                    mcp_server_id: parsedMcp.serverId,
+                    mcp_tool_name: parsedMcp.toolName
+                  }
+                : null
             };
 
             allToolResults.push({
@@ -628,7 +724,8 @@ export class StarcodeAgent {
               arguments: parsedArguments,
               ok: false,
               error: error.message,
-              duration_ms: toolDurationMs
+              duration_ms: toolDurationMs,
+              ...(payload.meta ?? {})
             });
 
             await this.logModelIo({
@@ -639,7 +736,8 @@ export class StarcodeAgent {
               name: toolName,
               ok: false,
               error: error.message,
-              duration_ms: toolDurationMs
+              duration_ms: toolDurationMs,
+              ...(payload.meta ?? {})
             });
 
             if (call?.id) {
@@ -661,6 +759,7 @@ export class StarcodeAgent {
           ...summaryUpdate
         });
       }
+      const sessionSummaryState = resolveSessionSummaryState(summaryUpdate);
 
       if (activePlan) {
         activePlan = {
@@ -701,7 +800,8 @@ export class StarcodeAgent {
         contractVersions: {
           prompt: this.promptVersion,
           tool_schema: this.toolSchemaVersion
-        }
+        },
+        sessionSummary: sessionSummaryState
       });
 
       await this.telemetry.captureModelBehavior({
@@ -721,7 +821,7 @@ export class StarcodeAgent {
         toolDecisions: allToolCalls,
         toolResults: allToolResults,
         reasoningSummary: "Behavior data captured from runtime instrumentation.",
-        sessionSummary: summaryUpdate,
+        sessionSummary: sessionSummaryState,
         plan: activePlan,
         contractVersions: {
           prompt: this.promptVersion,
@@ -743,7 +843,7 @@ export class StarcodeAgent {
         latency_ms: latencyMs,
         usage: latestUsage,
         latency_breakdown: latencyBreakdown,
-        session_summary: summaryUpdate,
+        session_summary: sessionSummaryState,
         plan: activePlan
       });
 
@@ -758,7 +858,7 @@ export class StarcodeAgent {
           prompt: this.promptVersion,
           tool_schema: this.toolSchemaVersion
         },
-        sessionSummary: summaryUpdate,
+        sessionSummary: sessionSummaryState,
         flush
       };
     } catch (error) {
@@ -771,6 +871,7 @@ export class StarcodeAgent {
           ...summaryUpdate
         });
       }
+      const sessionSummaryState = resolveSessionSummaryState(summaryUpdate);
 
       if (activePlan) {
         activePlan = {
@@ -824,6 +925,7 @@ export class StarcodeAgent {
           prompt: this.promptVersion,
           tool_schema: this.toolSchemaVersion
         },
+        sessionSummary: sessionSummaryState,
         latencyMs,
         latencyBreakdown
       });

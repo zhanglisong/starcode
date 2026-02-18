@@ -11,7 +11,8 @@ import { LocalFileTools } from "../tools/localFileTools.js";
 import { ModelIoLogger } from "../telemetry/modelIoLogger.js";
 import { GitContextProvider } from "../context/gitContextProvider.js";
 import { parseSlashCommand, renderSlashHelpText } from "./commandFlows.js";
-import { resolveRuntimeModelConfig, runProviderUtilityCommand } from "./providerAuthCommands.js";
+import { resolveRuntimeMcpConfig, resolveRuntimeModelConfig, runProviderUtilityCommand } from "./providerAuthCommands.js";
+import { McpManager } from "../mcp/mcpManager.js";
 
 function env(name, fallback) {
   const v = process.env[name] ?? fallback;
@@ -123,12 +124,18 @@ async function main() {
       output.write("  starcode auth list\n");
       output.write("  starcode models list [provider] [--endpoint <url>] [--api-key <key>]\n");
       output.write("  starcode models use <model_id> [--provider <provider>]\n");
+      output.write("  starcode mcp list\n");
+      output.write("  starcode mcp add <id> --endpoint <url> [--type http] [--api-key <key>] [--api-key-env <ENV>] [--header Key:Value]\n");
+      output.write("  starcode mcp remove <id>\n");
+      output.write("  starcode mcp enable <id>\n");
+      output.write("  starcode mcp disable <id>\n");
       return;
     }
     throw new Error(`Unknown command '${cliArgs[0]}'. Run 'starcode help' for available commands.`);
   }
 
   const runtimeModelConfig = await resolveRuntimeModelConfig({ env: process.env });
+  const runtimeMcpConfig = await resolveRuntimeMcpConfig({ env: process.env });
   const sessionId = process.env.SESSION_ID ?? randomUUID();
 
   const telemetry = new TelemetryClient({
@@ -193,12 +200,19 @@ async function main() {
     enabled: modelIoDebugEnabled,
     filePath: modelIoFilePath
   });
+  const mcpManager = new McpManager({
+    servers: runtimeMcpConfig.servers,
+    env: process.env,
+    timeoutMs: Number(process.env.STARCODE_MCP_TIMEOUT_MS ?? 8000),
+    cacheTtlMs: Number(process.env.STARCODE_MCP_CACHE_TTL_MS ?? 5000)
+  });
 
   const agent = new StarcodeAgent({
     provider,
     telemetry,
     modelIoLogger,
     gitContextProvider,
+    mcpManager,
     localTools,
     model,
     systemPrompt,
@@ -235,6 +249,7 @@ async function main() {
   }
   output.write(`streaming=${enableStreaming ? "on" : "off"}\n`);
   output.write(`planning_mode=${enablePlanningMode ? "on" : "off"}\n`);
+  output.write(`mcp_servers=${runtimeMcpConfig.servers.length}\n`);
   output.write(`prompt_version=${promptVersion} tool_schema_version=${toolSchemaVersion}\n`);
   output.write(
     `session_summary=${enableSessionSummary ? "on" : "off"} trigger=${sessionSummaryTriggerMessages} keep_recent=${sessionSummaryKeepRecent}\n`

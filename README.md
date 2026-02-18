@@ -69,6 +69,19 @@ Provider/auth UX commands (SC-023):
 - Stored profiles default to `~/.starcode/profiles.json` with restrictive permissions (`0700` dir, `0600` file).
 - Override profile path with `STARCODE_PROFILE_PATH`.
 
+MCP server lifecycle commands (SC-020):
+- `starcode mcp list`
+- `starcode mcp add <id> --endpoint <url> [--type http] [--api-key <key>] [--api-key-env <ENV>] [--header Key:Value]`
+- `starcode mcp remove <id>`
+- `starcode mcp enable <id>`
+- `starcode mcp disable <id>`
+
+MCP runtime behavior:
+- Enabled MCP servers are discovered at runtime (tools/resources/prompts) and injected into agent context.
+- MCP tools are exposed to the model as namespaced tools (`mcp__<server_id>__<tool_name>`).
+- Per-server failures are isolated; one failing MCP server does not crash the main turn loop.
+- MCP tool execution metadata (`mcp_server_id`, `mcp_server_version`, `mcp_tool_name`) is captured in tool telemetry.
+
 Slash workflow commands (SC-017):
 - `/fix <issue>`: deterministic fix workflow (inspect, patch, verify, summarize).
 - `/test [command]`: deterministic test workflow (default `npm test`).
