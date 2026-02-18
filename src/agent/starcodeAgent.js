@@ -115,6 +115,7 @@ export class StarcodeAgent {
     provider,
     telemetry,
     modelIoLogger,
+    gitContextProvider,
     localTools,
     model,
     systemPrompt,
@@ -126,6 +127,7 @@ export class StarcodeAgent {
     this.provider = provider;
     this.telemetry = telemetry;
     this.modelIoLogger = modelIoLogger;
+    this.gitContextProvider = gitContextProvider;
     this.localTools = localTools;
     this.model = model;
     this.temperature = temperature;
@@ -144,8 +146,53 @@ export class StarcodeAgent {
 
   async runTurn(userText) {
     const traceId = randomUUID();
+    const baseMessageCount = this.messages.length;
+    const turnMessages = [...this.messages];
+    let gitContext = null;
+    let hasContextMessage = false;
+    let persistedTurnMessages = false;
+
+    if (this.gitContextProvider) {
+      try {
+        gitContext = await this.gitContextProvider.buildContext();
+      } catch (error) {
+        await this.logModelIo({
+          phase: "git_context_error",
+          trace_id: traceId,
+          error: {
+            name: error.name,
+            message: error.message
+          }
+        });
+      }
+    }
+
+    if (gitContext?.content) {
+      turnMessages.push({
+        role: "system",
+        content: gitContext.content
+      });
+      hasContextMessage = true;
+
+      await this.logModelIo({
+        phase: "git_context",
+        trace_id: traceId,
+        source: gitContext.source,
+        branch: gitContext.branch,
+        changed_files: gitContext.changed_files,
+        truncated: gitContext.truncated
+      });
+    } else {
+      await this.logModelIo({
+        phase: "git_context",
+        trace_id: traceId,
+        source: "git",
+        skipped: true
+      });
+    }
+
     const userMessage = { role: "user", content: userText };
-    this.messages.push(userMessage);
+    turnMessages.push(userMessage);
 
     const startedAt = Date.now();
     const allToolCalls = [];
@@ -163,6 +210,18 @@ export class StarcodeAgent {
       toolRounds: 0
     };
 
+    const persistTurnMessages = () => {
+      if (persistedTurnMessages) {
+        return;
+      }
+      const skipCount = baseMessageCount + (hasContextMessage ? 1 : 0);
+      const newMessages = turnMessages.slice(skipCount);
+      if (newMessages.length) {
+        this.messages.push(...newMessages);
+      }
+      persistedTurnMessages = true;
+    };
+
     try {
       const tools = this.localTools?.getToolDefinitions?.() ?? [];
 
@@ -172,7 +231,7 @@ export class StarcodeAgent {
           trace_id: traceId,
           round,
           model: this.model,
-          messages: this.messages,
+          messages: turnMessages,
           tools
         });
 
@@ -182,7 +241,7 @@ export class StarcodeAgent {
         try {
           result = await this.provider.complete({
             model: this.model,
-            messages: this.messages,
+            messages: turnMessages,
             temperature: this.temperature,
             topP: this.topP,
             maxTokens: this.maxTokens,
@@ -216,7 +275,7 @@ export class StarcodeAgent {
           if (!assistantMessage.content) {
             assistantMessage.content = finalAssistantText;
           }
-          this.messages.push(assistantMessage);
+          turnMessages.push(assistantMessage);
           break;
         }
 
@@ -225,12 +284,12 @@ export class StarcodeAgent {
         if (round === this.maxToolRounds) {
           latestFinishReason = "max_tool_rounds";
           finalAssistantText = "Tool-call round limit reached before final response.";
-          this.messages.push({ role: "assistant", content: finalAssistantText });
+          turnMessages.push({ role: "assistant", content: finalAssistantText });
           break;
         }
 
         timing.toolRounds += 1;
-        this.messages.push(buildAssistantMessageFromResult(result, true));
+        turnMessages.push(buildAssistantMessageFromResult(result, true));
 
         const executedByShapeInRound = new Map();
 
@@ -282,7 +341,7 @@ export class StarcodeAgent {
               duplicate_of: cached.tool_call_id
             });
 
-            pushToolMessage(this.messages, toolCallId, cached.tool_payload);
+            pushToolMessage(turnMessages, toolCallId, cached.tool_payload);
             continue;
           }
 
@@ -328,7 +387,7 @@ export class StarcodeAgent {
             }
             executedByShapeInRound.set(shapeKey, payload);
 
-            pushToolMessage(this.messages, toolCallId, toolResult);
+            pushToolMessage(turnMessages, toolCallId, toolResult);
           } catch (error) {
             const toolDurationMs = Date.now() - toolStartedAt;
             timing.toolMs += toolDurationMs;
@@ -373,10 +432,12 @@ export class StarcodeAgent {
             }
             executedByShapeInRound.set(shapeKey, payload);
 
-            pushToolMessage(this.messages, toolCallId, toolPayload);
+            pushToolMessage(turnMessages, toolCallId, toolPayload);
           }
         }
       }
+
+      persistTurnMessages();
 
       const latencyMs = Date.now() - startedAt;
       const latencyBreakdown = createLatencyBreakdown({
@@ -445,6 +506,8 @@ export class StarcodeAgent {
         flush
       };
     } catch (error) {
+      persistTurnMessages();
+
       const latencyMs = Date.now() - startedAt;
       const latencyBreakdown = createLatencyBreakdown({
         totalMs: latencyMs,

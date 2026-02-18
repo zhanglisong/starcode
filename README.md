@@ -17,6 +17,7 @@ It supports company-wide aggregation across many engineers and exports post-trai
 - Interactive coding agent runtime.
 - Uses provider abstraction (`mock` or OpenAI-compatible).
 - Executes local workspace tools through model tool-calls (`list_files`, `glob_files`, `grep_files`, `read_file`, `write_file`, `create_file`, `edit_file`, `replace_in_file`, `insert_in_file`, `patch_file`, `move_file`, `delete_file`, `execute_shell`).
+- Injects bounded git workspace context (`status`, changed files, diff stat) into model turns when enabled.
 - Emits telemetry for every turn.
 
 2. Telemetry SDK (`/Users/huizhang/code/starcode/src/telemetry/*`)
@@ -64,6 +65,12 @@ Tool workspace boundary:
   - `STARCODE_SHELL_MAX_OUTPUT_BYTES`
   - `STARCODE_SHELL_ALLOW_COMMANDS`
   - `STARCODE_SHELL_DENY_PATTERNS`
+- Git context controls are configurable via:
+  - `STARCODE_ENABLE_GIT_CONTEXT`
+  - `STARCODE_GIT_CONTEXT_TIMEOUT_MS`
+  - `STARCODE_GIT_CONTEXT_MAX_CHARS`
+  - `STARCODE_GIT_CONTEXT_MAX_CHANGED_FILES`
+  - `STARCODE_GIT_CONTEXT_MAX_STATUS_LINES`
 
 Model I/O step tracing:
 - Set `STARCODE_DEBUG_MODEL_IO=1` to record loop-level agent <> model messages and tool execution steps.

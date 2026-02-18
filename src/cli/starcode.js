@@ -9,6 +9,7 @@ import { OpenAICompatibleProvider, MockProvider } from "../providers/openAICompa
 import { StarcodeAgent } from "../agent/starcodeAgent.js";
 import { LocalFileTools } from "../tools/localFileTools.js";
 import { ModelIoLogger } from "../telemetry/modelIoLogger.js";
+import { GitContextProvider } from "../context/gitContextProvider.js";
 
 function env(name, fallback) {
   const v = process.env[name] ?? fallback;
@@ -92,6 +93,14 @@ async function main() {
     shellAllowCommands: parseCsv(process.env.STARCODE_SHELL_ALLOW_COMMANDS),
     shellDenyPatterns: parseRegexCsv(process.env.STARCODE_SHELL_DENY_PATTERNS)
   });
+  const gitContextProvider = new GitContextProvider({
+    baseDir: workspaceDir,
+    enabled: process.env.STARCODE_ENABLE_GIT_CONTEXT !== "false",
+    timeoutMs: Number(process.env.STARCODE_GIT_CONTEXT_TIMEOUT_MS ?? 1500),
+    maxChars: Number(process.env.STARCODE_GIT_CONTEXT_MAX_CHARS ?? 3000),
+    maxChangedFiles: Number(process.env.STARCODE_GIT_CONTEXT_MAX_CHANGED_FILES ?? 30),
+    maxStatusLines: Number(process.env.STARCODE_GIT_CONTEXT_MAX_STATUS_LINES ?? 30)
+  });
   const modelIoDebugEnabled = process.env.STARCODE_DEBUG_MODEL_IO === "1";
   const modelIoFilePathInput = process.env.STARCODE_DEBUG_MODEL_IO_FILE ?? ".telemetry/model-io.jsonl";
   const modelIoFilePath = path.isAbsolute(modelIoFilePathInput)
@@ -106,6 +115,7 @@ async function main() {
     provider,
     telemetry,
     modelIoLogger,
+    gitContextProvider,
     localTools,
     model,
     systemPrompt:

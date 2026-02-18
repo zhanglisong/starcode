@@ -251,6 +251,27 @@ class DuplicateToolProvider {
   }
 }
 
+class ContextProbeProvider {
+  constructor() {
+    this.providerName = "context-probe";
+    this.capturedMessages = null;
+  }
+
+  async complete({ messages }) {
+    this.capturedMessages = messages;
+    return {
+      outputText: "Context received.",
+      message: {
+        role: "assistant",
+        content: "Context received."
+      },
+      finishReason: "stop",
+      toolCalls: [],
+      usage: { total_tokens: 5 }
+    };
+  }
+}
+
 function telemetryStub() {
   const state = {
     conversationTurns: [],
@@ -437,4 +458,57 @@ test("agent deduplicates duplicate tool calls in same round", async () => {
   const toolResults = telemetry.state.conversationTurns[0].toolResults;
   assert.equal(toolResults.length, 2);
   assert.equal(toolResults.filter((item) => item.reused).length, 1);
+});
+
+test("agent injects git context into model request without persisting it to history", async () => {
+  const provider = new ContextProbeProvider();
+  const telemetry = telemetryStub();
+  const gitContextProvider = {
+    async buildContext() {
+      return {
+        source: "git",
+        branch: "main",
+        changed_files: 2,
+        truncated: false,
+        content: "Git workspace context:\n- branch: main\n- changed_files: 2"
+      };
+    }
+  };
+
+  const agent = new StarcodeAgent({
+    provider,
+    telemetry,
+    gitContextProvider,
+    localTools: null,
+    model: "stub-model",
+    systemPrompt: "You are a test agent."
+  });
+
+  const result = await agent.runTurn("hello");
+  assert.equal(result.outputText, "Context received.");
+
+  const captured = provider.capturedMessages ?? [];
+  assert.equal(captured.some((message) => message.role === "system" && String(message.content).includes("Git workspace context")), true);
+  assert.equal(captured.some((message) => message.role === "user" && message.content === "hello"), true);
+
+  assert.equal(agent.messages.some((message) => String(message.content).includes("Git workspace context")), false);
+});
+
+test("agent continues when git context provider fails", async () => {
+  const provider = new ContextProbeProvider();
+  const agent = new StarcodeAgent({
+    provider,
+    telemetry: telemetryStub(),
+    gitContextProvider: {
+      async buildContext() {
+        throw new Error("git unavailable");
+      }
+    },
+    localTools: null,
+    model: "stub-model",
+    systemPrompt: "You are a test agent."
+  });
+
+  const result = await agent.runTurn("hello");
+  assert.equal(result.outputText, "Context received.");
 });
