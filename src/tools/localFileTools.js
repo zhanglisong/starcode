@@ -1,5 +1,38 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { spawn } from "node:child_process";
+
+const DEFAULT_SHELL_ALLOW_COMMANDS = [
+  "cat",
+  "cd",
+  "cp",
+  "echo",
+  "find",
+  "git",
+  "head",
+  "jq",
+  "ls",
+  "mkdir",
+  "mv",
+  "node",
+  "npm",
+  "pwd",
+  "rg",
+  "sed",
+  "tail",
+  "touch",
+  "wc"
+];
+
+const DEFAULT_SHELL_DENY_PATTERNS = [
+  /\brm\s+-rf\b/i,
+  /\bgit\s+reset\s+--hard\b/i,
+  /\bsudo\b/i,
+  /\bshutdown\b/i,
+  /\breboot\b/i,
+  /\bmkfs\b/i,
+  /\bdd\b/i
+];
 
 function safeJsonParse(raw) {
   if (typeof raw !== "string") {
@@ -18,6 +51,44 @@ function normalizePath(value) {
     return ".";
   }
   return value;
+}
+
+function clampNumber(value, fallback, min, max) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, Math.round(parsed)));
+}
+
+function appendBufferChunk(state, chunk, maxBytes) {
+  if (!Buffer.isBuffer(chunk)) {
+    return;
+  }
+
+  const remaining = maxBytes - state.bytes;
+  if (remaining <= 0) {
+    state.truncated = true;
+    return;
+  }
+
+  if (chunk.length <= remaining) {
+    state.chunks.push(chunk);
+    state.bytes += chunk.length;
+    return;
+  }
+
+  state.chunks.push(chunk.subarray(0, remaining));
+  state.bytes += remaining;
+  state.truncated = true;
+}
+
+function extractExecutable(command) {
+  const match = String(command ?? "").trim().match(/^['"]?([^'"\s]+)/);
+  if (!match) {
+    return "";
+  }
+  return path.basename(match[1]);
 }
 
 function escapeRegExp(value) {
@@ -155,12 +226,33 @@ export class LocalFileTools {
     baseDir = process.cwd(),
     maxReadBytes = 200_000,
     maxListEntries = 500,
-    maxGrepMatches = 200
+    maxGrepMatches = 200,
+    enableShellTool = true,
+    shellTimeoutMs = 15_000,
+    maxShellTimeoutMs = 120_000,
+    shellMaxOutputBytes = 32_000,
+    shellAllowCommands = DEFAULT_SHELL_ALLOW_COMMANDS,
+    shellDenyPatterns = DEFAULT_SHELL_DENY_PATTERNS
   } = {}) {
     this.baseDir = path.resolve(baseDir);
     this.maxReadBytes = maxReadBytes;
     this.maxListEntries = maxListEntries;
     this.maxGrepMatches = maxGrepMatches;
+    this.enableShellTool = !!enableShellTool;
+    this.shellTimeoutMs = clampNumber(shellTimeoutMs, 15_000, 100, 120_000);
+    this.maxShellTimeoutMs = clampNumber(maxShellTimeoutMs, 120_000, 100, 300_000);
+    this.shellMaxOutputBytes = clampNumber(shellMaxOutputBytes, 32_000, 512, 1_000_000);
+    const normalizedAllowCommands = (Array.isArray(shellAllowCommands) ? shellAllowCommands : [])
+      .map((value) => String(value).trim())
+      .filter(Boolean);
+    this.shellAllowCommands = new Set(
+      normalizedAllowCommands.length ? normalizedAllowCommands : DEFAULT_SHELL_ALLOW_COMMANDS
+    );
+
+    const normalizedDenyPatterns = Array.isArray(shellDenyPatterns) ? shellDenyPatterns : [];
+    this.shellDenyPatterns = (normalizedDenyPatterns.length ? normalizedDenyPatterns : DEFAULT_SHELL_DENY_PATTERNS).map(
+      (pattern) => (pattern instanceof RegExp ? pattern : new RegExp(String(pattern), "i"))
+    );
   }
 
   getToolDefinitions() {
@@ -393,6 +485,32 @@ export class LocalFileTools {
               recursive: { type: "boolean" }
             },
             required: ["path"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "execute_shell",
+          description:
+            "Execute a shell command in workspace with safety controls (allowlist, denylist, timeout, output truncation).",
+          parameters: {
+            type: "object",
+            properties: {
+              command: {
+                type: "string",
+                description: "Shell command to run."
+              },
+              cwd: {
+                type: "string",
+                description: "Optional workspace-relative working directory."
+              },
+              timeout_ms: {
+                type: "number",
+                description: "Optional timeout override in milliseconds."
+              }
+            },
+            required: ["command"]
           }
         }
       }
@@ -827,6 +945,139 @@ export class LocalFileTools {
     };
   }
 
+  evaluateShellPolicy(command) {
+    if (!this.enableShellTool) {
+      return {
+        allowed: false,
+        blocked_reason: "shell tool is disabled"
+      };
+    }
+
+    const text = String(command ?? "").trim();
+    if (!text) {
+      return {
+        allowed: false,
+        blocked_reason: "command is required"
+      };
+    }
+
+    if (text.includes("\n")) {
+      return {
+        allowed: false,
+        blocked_reason: "multi-line commands are not allowed"
+      };
+    }
+
+    for (const pattern of this.shellDenyPatterns) {
+      if (pattern.test(text)) {
+        return {
+          allowed: false,
+          blocked_reason: `command blocked by policy (${pattern})`
+        };
+      }
+    }
+
+    const executable = extractExecutable(text);
+    if (!executable) {
+      return {
+        allowed: false,
+        blocked_reason: "unable to determine executable"
+      };
+    }
+
+    if (this.shellAllowCommands.size && !this.shellAllowCommands.has(executable)) {
+      return {
+        allowed: false,
+        blocked_reason: `command not in allowlist (${executable})`,
+        executable
+      };
+    }
+
+    return {
+      allowed: true,
+      executable
+    };
+  }
+
+  async executeShell({ command, cwd = ".", timeout_ms } = {}) {
+    const policy = this.evaluateShellPolicy(command);
+    const commandText = String(command ?? "");
+
+    if (!policy.allowed) {
+      return {
+        ok: false,
+        blocked: true,
+        blocked_reason: policy.blocked_reason,
+        command: commandText
+      };
+    }
+
+    const workingDir = this.resolveWithinBase(normalizePath(cwd));
+    const timeoutMs = clampNumber(timeout_ms, this.shellTimeoutMs, 100, this.maxShellTimeoutMs);
+    const startedAt = Date.now();
+    const stdoutState = {
+      chunks: [],
+      bytes: 0,
+      truncated: false
+    };
+    const stderrState = {
+      chunks: [],
+      bytes: 0,
+      truncated: false
+    };
+
+    return new Promise((resolve) => {
+      const child = spawn("/bin/zsh", ["-lc", commandText], {
+        cwd: workingDir,
+        env: process.env
+      });
+
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGKILL");
+      }, timeoutMs);
+
+      child.stdout.on("data", (chunk) => appendBufferChunk(stdoutState, chunk, this.shellMaxOutputBytes));
+      child.stderr.on("data", (chunk) => appendBufferChunk(stderrState, chunk, this.shellMaxOutputBytes));
+
+      child.on("error", (error) => {
+        clearTimeout(timer);
+        resolve({
+          ok: false,
+          command: commandText,
+          cwd: path.relative(this.baseDir, workingDir) || ".",
+          executable: policy.executable,
+          timed_out: timedOut,
+          truncated: stdoutState.truncated || stderrState.truncated,
+          exit_code: null,
+          signal: null,
+          stdout: Buffer.concat(stdoutState.chunks).toString("utf8"),
+          stderr: Buffer.concat(stderrState.chunks).toString("utf8"),
+          duration_ms: Date.now() - startedAt,
+          error: error.message
+        });
+      });
+
+      child.on("close", (code, signal) => {
+        clearTimeout(timer);
+        resolve({
+          ok: !timedOut && code === 0,
+          command: commandText,
+          cwd: path.relative(this.baseDir, workingDir) || ".",
+          executable: policy.executable,
+          timed_out: timedOut,
+          truncated: stdoutState.truncated || stderrState.truncated,
+          exit_code: Number.isInteger(code) ? code : null,
+          signal: signal ?? null,
+          stdout: Buffer.concat(stdoutState.chunks).toString("utf8"),
+          stderr: Buffer.concat(stderrState.chunks).toString("utf8"),
+          duration_ms: Date.now() - startedAt
+        });
+      });
+    });
+  }
+
   async executeToolCall(call) {
     const fn = call?.function;
     const name = fn?.name;
@@ -857,6 +1108,8 @@ export class LocalFileTools {
         return this.moveFile(args);
       case "delete_file":
         return this.deleteFile(args);
+      case "execute_shell":
+        return this.executeShell(args);
       default:
         throw new Error(`Unsupported tool: ${name}`);
     }

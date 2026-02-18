@@ -17,6 +17,26 @@ function env(name, fallback) {
   return value;
 }
 
+function parseCsv(input) {
+  if (!input || typeof input !== "string") {
+    return [];
+  }
+  return input
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function parseRegexCsv(input) {
+  return parseCsv(input).map((pattern) => {
+    try {
+      return new RegExp(pattern, "i");
+    } catch {
+      return new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    }
+  });
+}
+
 class EvalTelemetry {
   constructor() {
     this.turnByTraceId = new Map();
@@ -174,7 +194,15 @@ async function main() {
     await writeSetupFiles(taskWorkspace, task.setupFiles);
 
     const telemetry = new EvalTelemetry();
-    const tools = new LocalFileTools({ baseDir: taskWorkspace });
+    const tools = new LocalFileTools({
+      baseDir: taskWorkspace,
+      enableShellTool: process.env.STARCODE_ENABLE_SHELL_TOOL !== "false",
+      shellTimeoutMs: Number(process.env.STARCODE_SHELL_TIMEOUT_MS ?? 15_000),
+      maxShellTimeoutMs: Number(process.env.STARCODE_SHELL_MAX_TIMEOUT_MS ?? 120_000),
+      shellMaxOutputBytes: Number(process.env.STARCODE_SHELL_MAX_OUTPUT_BYTES ?? 32_000),
+      shellAllowCommands: parseCsv(process.env.STARCODE_SHELL_ALLOW_COMMANDS),
+      shellDenyPatterns: parseRegexCsv(process.env.STARCODE_SHELL_DENY_PATTERNS)
+    });
 
     const agent = new StarcodeAgent({
       provider,

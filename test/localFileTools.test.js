@@ -228,6 +228,68 @@ test("list_files returns entries", async () => {
   assert.equal(paths.includes("sub/b.txt"), true);
 });
 
+test("execute_shell runs allowlisted command", async () => {
+  const dir = await makeTempDir();
+  const tools = new LocalFileTools({ baseDir: dir });
+
+  const result = await tools.executeShell({ command: "echo shell-ok" });
+  assert.equal(result.ok, true);
+  assert.equal(result.exit_code, 0);
+  assert.match(result.stdout, /shell-ok/);
+});
+
+test("execute_shell blocks non-allowlisted command", async () => {
+  const dir = await makeTempDir();
+  const tools = new LocalFileTools({ baseDir: dir });
+
+  const result = await tools.executeShell({ command: "python -V" });
+  assert.equal(result.ok, false);
+  assert.equal(result.blocked, true);
+  assert.match(result.blocked_reason, /allowlist/);
+});
+
+test("execute_shell blocks denylist command with reason", async () => {
+  const dir = await makeTempDir();
+  const tools = new LocalFileTools({ baseDir: dir });
+
+  const result = await tools.executeShell({ command: "rm -rf /tmp/test" });
+  assert.equal(result.ok, false);
+  assert.equal(result.blocked, true);
+  assert.match(result.blocked_reason, /blocked by policy/);
+});
+
+test("execute_shell enforces timeout and truncation", async () => {
+  const dir = await makeTempDir();
+  const tools = new LocalFileTools({
+    baseDir: dir,
+    shellTimeoutMs: 120,
+    shellMaxOutputBytes: 128
+  });
+
+  const timeoutResult = await tools.executeShell({
+    command: "node -e \"setTimeout(() => process.stdout.write('done'), 800)\"",
+    timeout_ms: 120
+  });
+  assert.equal(timeoutResult.ok, false);
+  assert.equal(timeoutResult.timed_out, true);
+
+  const truncationResult = await tools.executeShell({
+    command: "node -e \"process.stdout.write('a'.repeat(5000))\""
+  });
+  assert.equal(truncationResult.ok, true);
+  assert.equal(truncationResult.truncated, true);
+  assert.equal(truncationResult.stdout.length <= 512, true);
+});
+
+test("execute_shell rejects cwd outside workspace", async () => {
+  const dir = await makeTempDir();
+  const tools = new LocalFileTools({ baseDir: dir });
+
+  await assert.rejects(async () => {
+    await tools.executeShell({ command: "echo hi", cwd: "../outside" });
+  }, /outside workspace/);
+});
+
 test("executeToolCall supports new tool names", async () => {
   const dir = await makeTempDir();
   const tools = new LocalFileTools({ baseDir: dir });
@@ -242,6 +304,16 @@ test("executeToolCall supports new tool names", async () => {
   assert.equal(result.ok, true);
   const readResult = await tools.readFile({ path: "x.txt" });
   assert.equal(readResult.content, "x");
+
+  const shellResult = await tools.executeToolCall({
+    function: {
+      name: "execute_shell",
+      arguments: JSON.stringify({ command: "echo via-tool-call" })
+    }
+  });
+
+  assert.equal(shellResult.ok, true);
+  assert.match(shellResult.stdout, /via-tool-call/);
 });
 
 test("path traversal is blocked", async () => {

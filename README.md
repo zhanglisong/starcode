@@ -16,7 +16,7 @@ It supports company-wide aggregation across many engineers and exports post-trai
 1. Agent CLI (`/Users/huizhang/code/starcode/src/cli/starcode.js`)
 - Interactive coding agent runtime.
 - Uses provider abstraction (`mock` or OpenAI-compatible).
-- Executes local workspace tools through model tool-calls (`list_files`, `glob_files`, `grep_files`, `read_file`, `write_file`, `create_file`, `edit_file`, `replace_in_file`, `insert_in_file`, `patch_file`, `move_file`, `delete_file`).
+- Executes local workspace tools through model tool-calls (`list_files`, `glob_files`, `grep_files`, `read_file`, `write_file`, `create_file`, `edit_file`, `replace_in_file`, `insert_in_file`, `patch_file`, `move_file`, `delete_file`, `execute_shell`).
 - Emits telemetry for every turn.
 
 2. Telemetry SDK (`/Users/huizhang/code/starcode/src/telemetry/*`)
@@ -57,6 +57,13 @@ node /Users/huizhang/code/starcode/src/cli/starcode.js
 Tool workspace boundary:
 - Set `STARCODE_WORKSPACE_DIR` to limit read/write/list operations to one root directory.
 - Default is current working directory when launching the CLI.
+- Shell tool safety controls are configurable via:
+  - `STARCODE_ENABLE_SHELL_TOOL`
+  - `STARCODE_SHELL_TIMEOUT_MS`
+  - `STARCODE_SHELL_MAX_TIMEOUT_MS`
+  - `STARCODE_SHELL_MAX_OUTPUT_BYTES`
+  - `STARCODE_SHELL_ALLOW_COMMANDS`
+  - `STARCODE_SHELL_DENY_PATTERNS`
 
 Model I/O step tracing:
 - Set `STARCODE_DEBUG_MODEL_IO=1` to record loop-level agent <> model messages and tool execution steps.

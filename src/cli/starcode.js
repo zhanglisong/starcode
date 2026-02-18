@@ -18,6 +18,26 @@ function env(name, fallback) {
   return v;
 }
 
+function parseCsv(input) {
+  if (!input || typeof input !== "string") {
+    return [];
+  }
+  return input
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function parseRegexCsv(input) {
+  return parseCsv(input).map((pattern) => {
+    try {
+      return new RegExp(pattern, "i");
+    } catch {
+      return new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    }
+  });
+}
+
 function createProvider() {
   const mode = String(process.env.MODEL_PROVIDER ?? "mock").toLowerCase();
 
@@ -63,7 +83,15 @@ async function main() {
   const provider = createProvider();
   const model = process.env.MODEL_NAME ?? "gpt-4.1-mini";
   const workspaceDir = process.env.STARCODE_WORKSPACE_DIR ?? process.cwd();
-  const localTools = new LocalFileTools({ baseDir: workspaceDir });
+  const localTools = new LocalFileTools({
+    baseDir: workspaceDir,
+    enableShellTool: process.env.STARCODE_ENABLE_SHELL_TOOL !== "false",
+    shellTimeoutMs: Number(process.env.STARCODE_SHELL_TIMEOUT_MS ?? 15_000),
+    maxShellTimeoutMs: Number(process.env.STARCODE_SHELL_MAX_TIMEOUT_MS ?? 120_000),
+    shellMaxOutputBytes: Number(process.env.STARCODE_SHELL_MAX_OUTPUT_BYTES ?? 32_000),
+    shellAllowCommands: parseCsv(process.env.STARCODE_SHELL_ALLOW_COMMANDS),
+    shellDenyPatterns: parseRegexCsv(process.env.STARCODE_SHELL_DENY_PATTERNS)
+  });
   const modelIoDebugEnabled = process.env.STARCODE_DEBUG_MODEL_IO === "1";
   const modelIoFilePathInput = process.env.STARCODE_DEBUG_MODEL_IO_FILE ?? ".telemetry/model-io.jsonl";
   const modelIoFilePath = path.isAbsolute(modelIoFilePathInput)
