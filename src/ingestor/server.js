@@ -54,10 +54,12 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && req.url === "/health") {
-      const count = await storage.countAllEvents();
+      const total = await storage.countAllEvents();
+      const summary = await storage.summarizeMetadata();
       return json(res, 200, {
         ok: true,
-        total_events: count,
+        total_events: total,
+        metadata: summary,
         time: new Date().toISOString()
       });
     }

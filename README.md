@@ -30,6 +30,8 @@ It supports company-wide aggregation across many engineers and exports post-trai
 - HTTP service accepting `POST /v1/events`.
 - API-key gate via `x-company-api-key`.
 - Stores events in JSONL partitioned by org/date/event type.
+- Idempotent ingest via persisted `event_id` index (duplicate event posts are deduplicated).
+- `GET /health` exposes total event count plus org/team/engineer aggregation summary.
 
 4. Training Export (`/Users/huizhang/code/starcode/src/training/exportDataset.js`)
 - Builds SFT rows from conversation events.

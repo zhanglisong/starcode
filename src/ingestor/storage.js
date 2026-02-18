@@ -13,15 +13,64 @@ function getDay(isoString) {
   return date.toISOString().slice(0, 10);
 }
 
+function increment(map, key) {
+  const normalized = String(key ?? "unknown");
+  map.set(normalized, (map.get(normalized) ?? 0) + 1);
+}
+
+function mapToSortedArray(map) {
+  return [...map.entries()]
+    .map(([id, events]) => ({ id, events }))
+    .sort((a, b) => b.events - a.events || a.id.localeCompare(b.id));
+}
+
+function parseJsonLines(text) {
+  return String(text)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
 export class IngestStorage {
   constructor(baseDir) {
     this.baseDir = baseDir;
     this.seen = new Set();
     this.seenLimit = 200000;
+    this.seenIndexFile = path.join(this.baseDir, ".seen_event_ids.jsonl");
+    this.initialized = false;
   }
 
   async init() {
+    if (this.initialized) {
+      return;
+    }
+
     await fs.mkdir(this.baseDir, { recursive: true });
+
+    try {
+      const raw = await fs.readFile(this.seenIndexFile, "utf8");
+      for (const line of raw.split("\n")) {
+        const id = line.trim();
+        if (!id) {
+          continue;
+        }
+        this.remember(id);
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw error;
+      }
+    }
+
+    this.initialized = true;
   }
 
   remember(eventId) {
@@ -32,10 +81,27 @@ export class IngestStorage {
     }
   }
 
+  async appendSeenIndex(eventIds) {
+    if (!eventIds.length) {
+      return;
+    }
+
+    const lines = eventIds.map((id) => String(id).trim()).filter(Boolean);
+    if (!lines.length) {
+      return;
+    }
+
+    await fs.appendFile(this.seenIndexFile, `${lines.join("\n")}\n`, "utf8");
+  }
+
+  isDataFile(fileName) {
+    return fileName.endsWith(".jsonl") && fileName !== path.basename(this.seenIndexFile);
+  }
+
   async writeEvents(events) {
     await this.init();
     const buckets = new Map();
-    let accepted = 0;
+    const acceptedIds = [];
 
     for (const event of events) {
       if (this.seen.has(event.event_id)) {
@@ -43,7 +109,7 @@ export class IngestStorage {
       }
 
       this.remember(event.event_id);
-      accepted += 1;
+      acceptedIds.push(event.event_id);
 
       const org = safeSegment(event.org_id);
       const day = safeSegment(getDay(event.occurred_at));
@@ -65,17 +131,18 @@ export class IngestStorage {
       await fs.appendFile(file, `${lines}\n`, "utf8");
     }
 
+    await this.appendSeenIndex(acceptedIds);
+
     return {
-      accepted,
-      deduplicated: events.length - accepted
+      accepted: acceptedIds.length,
+      deduplicated: events.length - acceptedIds.length
     };
   }
 
-  async countAllEvents() {
+  async walkEventLines(onLine) {
     await this.init();
-    let total = 0;
 
-    async function walk(dir) {
+    const walk = async (dir) => {
       const entries = await fs.readdir(dir, { withFileTypes: true });
       for (const entry of entries) {
         const full = path.join(dir, entry.name);
@@ -84,16 +151,53 @@ export class IngestStorage {
           continue;
         }
 
-        if (!entry.isFile() || !entry.name.endsWith(".jsonl")) {
+        if (!entry.isFile() || !this.isDataFile(entry.name)) {
           continue;
         }
 
         const raw = await fs.readFile(full, "utf8");
-        total += raw.split("\n").map((line) => line.trim()).filter(Boolean).length;
+        const rows = parseJsonLines(raw);
+        for (const row of rows) {
+          await onLine(row);
+        }
       }
-    }
+    };
 
     await walk(this.baseDir);
+  }
+
+  async countAllEvents() {
+    let total = 0;
+
+    await this.walkEventLines(() => {
+      total += 1;
+    });
+
     return total;
+  }
+
+  async summarizeMetadata() {
+    const byOrg = new Map();
+    const byTeam = new Map();
+    const byEngineer = new Map();
+
+    await this.walkEventLines((event) => {
+      increment(byOrg, event.org_id);
+      increment(byTeam, event.team_id ?? "unknown");
+      increment(byEngineer, event.engineer_id ?? "unknown");
+    });
+
+    const orgRows = mapToSortedArray(byOrg);
+    const teamRows = mapToSortedArray(byTeam);
+    const engineerRows = mapToSortedArray(byEngineer);
+
+    return {
+      orgs: orgRows.length,
+      teams: teamRows.length,
+      engineers: engineerRows.length,
+      by_org: orgRows,
+      by_team: teamRows,
+      by_engineer: engineerRows
+    };
   }
 }
