@@ -40,6 +40,27 @@ function parseRegexCsv(input) {
   });
 }
 
+function resolvePromptVersion() {
+  return String(process.env.STARCODE_PROMPT_VERSION ?? "v1").toLowerCase();
+}
+
+function resolveSystemPrompt(promptVersion) {
+  const defaults = {
+    v1: "You are Starcode, an enterprise coding agent. Use available tools for real file operations when asked to read, list, or write files.",
+    v2:
+      "You are Starcode, an enterprise coding agent. Prefer precise, minimal edits, verify changes with tools when possible, and report concrete evidence of completion."
+  };
+
+  const versionKey = `SYSTEM_PROMPT_${String(promptVersion).toUpperCase()}`;
+  if (process.env.SYSTEM_PROMPT) {
+    return process.env.SYSTEM_PROMPT;
+  }
+  if (process.env[versionKey]) {
+    return process.env[versionKey];
+  }
+  return defaults[promptVersion] ?? defaults.v1;
+}
+
 function createProvider() {
   const mode = String(process.env.MODEL_PROVIDER ?? "mock").toLowerCase();
 
@@ -105,8 +126,11 @@ async function main() {
   const enableStreaming = process.env.STARCODE_ENABLE_STREAMING !== "false";
   const enablePlanningMode = process.env.STARCODE_ENABLE_PLANNING_MODE === "true";
   const enableSessionSummary = process.env.STARCODE_ENABLE_SESSION_SUMMARY !== "false";
+  const promptVersion = resolvePromptVersion();
+  const toolSchemaVersion = String(process.env.STARCODE_TOOL_SCHEMA_VERSION ?? "v1").toLowerCase();
   const sessionSummaryTriggerMessages = Number(process.env.STARCODE_SESSION_SUMMARY_TRIGGER_MESSAGES ?? 18);
   const sessionSummaryKeepRecent = Number(process.env.STARCODE_SESSION_SUMMARY_KEEP_RECENT ?? 8);
+  const systemPrompt = resolveSystemPrompt(promptVersion);
   const localTools = new LocalFileTools({
     baseDir: workspaceDir,
     enableShellTool: process.env.STARCODE_ENABLE_SHELL_TOOL !== "false",
@@ -147,9 +171,9 @@ async function main() {
     gitContextProvider,
     localTools,
     model,
-    systemPrompt:
-      process.env.SYSTEM_PROMPT ??
-      "You are Starcode, an enterprise coding agent. Use available tools for real file operations when asked to read, list, or write files.",
+    systemPrompt,
+    promptVersion,
+    toolSchemaVersion,
     temperature: Number(process.env.MODEL_TEMPERATURE ?? 0.2),
     topP: Number(process.env.MODEL_TOP_P ?? 1),
     maxTokens: Number(process.env.MODEL_MAX_TOKENS ?? 1024),
@@ -181,6 +205,7 @@ async function main() {
   }
   output.write(`streaming=${enableStreaming ? "on" : "off"}\n`);
   output.write(`planning_mode=${enablePlanningMode ? "on" : "off"}\n`);
+  output.write(`prompt_version=${promptVersion} tool_schema_version=${toolSchemaVersion}\n`);
   output.write(
     `session_summary=${enableSessionSummary ? "on" : "off"} trigger=${sessionSummaryTriggerMessages} keep_recent=${sessionSummaryKeepRecent}\n`
   );

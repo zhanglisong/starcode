@@ -715,3 +715,36 @@ test("agent planning mode emits plan and injects it into execution context", asy
   const noPlan = await agent.runTurn("just answer", { planning: false });
   assert.equal(noPlan.plan, null);
 });
+
+test("agent records prompt/tool contract versions in telemetry and model I/O logs", async () => {
+  const provider = new ContextProbeProvider();
+  const telemetry = telemetryStub();
+  const modelIoLogger = modelIoLoggerStub();
+
+  const agent = new StarcodeAgent({
+    provider,
+    telemetry,
+    modelIoLogger,
+    localTools: null,
+    model: "stub-model",
+    systemPrompt: "You are a test agent.",
+    promptVersion: "v2",
+    toolSchemaVersion: "v2"
+  });
+
+  const result = await agent.runTurn("hello");
+  assert.equal(result.contractVersions.prompt, "v2");
+  assert.equal(result.contractVersions.tool_schema, "v2");
+
+  const conversationTurn = telemetry.state.conversationTurns[0];
+  assert.equal(conversationTurn.contractVersions.prompt, "v2");
+  assert.equal(conversationTurn.contractVersions.tool_schema, "v2");
+
+  const behaviorTurn = telemetry.state.modelBehaviorEvents[0];
+  assert.equal(behaviorTurn.contractVersions.prompt, "v2");
+  assert.equal(behaviorTurn.contractVersions.tool_schema, "v2");
+
+  const modelRequest = modelIoLogger.state.events.find((event) => event.phase === "model_request");
+  assert.equal(modelRequest.prompt_version, "v2");
+  assert.equal(modelRequest.tool_schema_version, "v2");
+});

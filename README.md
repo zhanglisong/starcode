@@ -72,6 +72,12 @@ Optional planner mode (SC-008):
 - Starcode emits an actionable step plan before execution for each turn.
 - Disable to skip planning and execute directly.
 
+Prompt/tool contract versioning (SC-009):
+- Set `STARCODE_PROMPT_VERSION` (`v1` or `v2`) to select prompt contract.
+- Set `STARCODE_TOOL_SCHEMA_VERSION` (`v1` or `v2`) to select tool-schema contract.
+- Override prompts with `SYSTEM_PROMPT` or `SYSTEM_PROMPT_V2`.
+- Prompt/schema versions are recorded in model I/O logs and telemetry per trace.
+
 Tool workspace boundary:
 - Set `STARCODE_WORKSPACE_DIR` to limit read/write/list operations to one root directory.
 - Default is current working directory when launching the CLI.

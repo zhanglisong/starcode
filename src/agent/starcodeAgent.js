@@ -178,6 +178,29 @@ function planToSystemPrompt(plan) {
   ].join("\n");
 }
 
+function applyToolSchemaVersion(tools, version) {
+  const schemaVersion = String(version ?? "v1");
+  if (schemaVersion === "v1") {
+    return tools;
+  }
+
+  return tools.map((tool) => {
+    const fn = tool?.function ?? {};
+    const baseDescription = String(fn.description ?? "").trim();
+    const description = baseDescription.startsWith(`[schema:${schemaVersion}]`)
+      ? baseDescription
+      : `[schema:${schemaVersion}] ${baseDescription}`.trim();
+
+    return {
+      ...tool,
+      function: {
+        ...fn,
+        description
+      }
+    };
+  });
+}
+
 export class StarcodeAgent {
   constructor({
     provider,
@@ -187,6 +210,8 @@ export class StarcodeAgent {
     localTools,
     model,
     systemPrompt,
+    promptVersion = "v1",
+    toolSchemaVersion = "v1",
     temperature = 0.2,
     topP = 1,
     maxTokens = 1024,
@@ -203,6 +228,8 @@ export class StarcodeAgent {
     this.gitContextProvider = gitContextProvider;
     this.localTools = localTools;
     this.model = model;
+    this.promptVersion = promptVersion;
+    this.toolSchemaVersion = toolSchemaVersion;
     this.temperature = temperature;
     this.topP = topP;
     this.maxTokens = maxTokens;
@@ -376,7 +403,8 @@ export class StarcodeAgent {
     };
 
     try {
-      const tools = this.localTools?.getToolDefinitions?.() ?? [];
+      const rawTools = this.localTools?.getToolDefinitions?.() ?? [];
+      const tools = applyToolSchemaVersion(rawTools, this.toolSchemaVersion);
 
       for (let round = 0; round <= this.maxToolRounds; round += 1) {
         await this.logModelIo({
@@ -384,6 +412,8 @@ export class StarcodeAgent {
           trace_id: traceId,
           round,
           model: this.model,
+          prompt_version: this.promptVersion,
+          tool_schema_version: this.toolSchemaVersion,
           stream_requested: streamRequested,
           messages: turnMessages,
           tools
@@ -667,7 +697,11 @@ export class StarcodeAgent {
         latencyMs,
         latencyBreakdown,
         status: "ok",
-        plan: activePlan
+        plan: activePlan,
+        contractVersions: {
+          prompt: this.promptVersion,
+          tool_schema: this.toolSchemaVersion
+        }
       });
 
       await this.telemetry.captureModelBehavior({
@@ -689,6 +723,10 @@ export class StarcodeAgent {
         reasoningSummary: "Behavior data captured from runtime instrumentation.",
         sessionSummary: summaryUpdate,
         plan: activePlan,
+        contractVersions: {
+          prompt: this.promptVersion,
+          tool_schema: this.toolSchemaVersion
+        },
         usage: latestUsage,
         latencyMs,
         latencyBreakdown
@@ -700,6 +738,8 @@ export class StarcodeAgent {
         phase: "turn_end",
         trace_id: traceId,
         output_text: finalAssistantText,
+        prompt_version: this.promptVersion,
+        tool_schema_version: this.toolSchemaVersion,
         latency_ms: latencyMs,
         usage: latestUsage,
         latency_breakdown: latencyBreakdown,
@@ -714,6 +754,10 @@ export class StarcodeAgent {
         latencyMs,
         latencyBreakdown,
         plan: activePlan,
+        contractVersions: {
+          prompt: this.promptVersion,
+          tool_schema: this.toolSchemaVersion
+        },
         sessionSummary: summaryUpdate,
         flush
       };
@@ -776,6 +820,10 @@ export class StarcodeAgent {
           message: error.message
         },
         plan: activePlan,
+        contractVersions: {
+          prompt: this.promptVersion,
+          tool_schema: this.toolSchemaVersion
+        },
         latencyMs,
         latencyBreakdown
       });

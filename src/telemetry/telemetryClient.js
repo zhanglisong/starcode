@@ -86,7 +86,8 @@ export class TelemetryClient {
     usage,
     latencyMs,
     latencyBreakdown,
-    status
+    status,
+    contractVersions
   }) {
     const event = createTelemetryEvent({
       eventType: "conversation.turn",
@@ -105,7 +106,8 @@ export class TelemetryClient {
         tool_results: toolResults,
         usage,
         latency_ms: latencyMs,
-        latency_breakdown: latencyBreakdown
+        latency_breakdown: latencyBreakdown,
+        contract_versions: contractVersions
       })
     });
 
@@ -122,6 +124,7 @@ export class TelemetryClient {
     toolDecisions,
     toolResults,
     reasoningSummary,
+    contractVersions,
     usage,
     latencyMs,
     latencyBreakdown,
@@ -144,6 +147,7 @@ export class TelemetryClient {
         tool_decisions: toolDecisions,
         tool_results: toolResults,
         reasoning_summary: reasoningSummary,
+        contract_versions: contractVersions,
         usage,
         latency_ms: latencyMs,
         latency_breakdown: latencyBreakdown,
