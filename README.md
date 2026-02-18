@@ -60,6 +60,15 @@ node /Users/huizhang/code/starcode/src/ingestor/server.js
 node /Users/huizhang/code/starcode/src/cli/starcode.js
 ```
 
+Provider/auth UX commands (SC-023):
+- `starcode auth login <provider> [--api-key <key>] [--endpoint <url>] [--model <id>]`
+- `starcode auth logout [provider|--all]`
+- `starcode auth list`
+- `starcode models list [provider] [--endpoint <url>] [--api-key <key>]`
+- `starcode models use <model_id> [--provider <provider>]`
+- Stored profiles default to `~/.starcode/profiles.json` with restrictive permissions (`0700` dir, `0600` file).
+- Override profile path with `STARCODE_PROFILE_PATH`.
+
 Slash workflow commands (SC-017):
 - `/fix <issue>`: deterministic fix workflow (inspect, patch, verify, summarize).
 - `/test [command]`: deterministic test workflow (default `npm test`).

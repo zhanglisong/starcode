@@ -11,6 +11,7 @@ import { LocalFileTools } from "../tools/localFileTools.js";
 import { ModelIoLogger } from "../telemetry/modelIoLogger.js";
 import { GitContextProvider } from "../context/gitContextProvider.js";
 import { parseSlashCommand, renderSlashHelpText } from "./commandFlows.js";
+import { resolveRuntimeModelConfig, runProviderUtilityCommand } from "./providerAuthCommands.js";
 
 function env(name, fallback) {
   const v = process.env[name] ?? fallback;
@@ -61,18 +62,18 @@ function resolveSystemPrompt(promptVersion) {
   return defaults[promptVersion] ?? defaults.v1;
 }
 
-function createProvider() {
-  const mode = String(process.env.MODEL_PROVIDER ?? "mock").toLowerCase();
+function createProvider({ providerName, apiKey, endpoint }) {
+  const mode = String(providerName ?? process.env.MODEL_PROVIDER ?? "mock").toLowerCase();
 
   if (mode === "mock") {
     return new MockProvider();
   }
 
-  const apiKey = mode === "ollama" ? process.env.MODEL_API_KEY ?? "ollama" : env("MODEL_API_KEY");
+  const resolvedApiKey = mode === "ollama" ? apiKey ?? process.env.MODEL_API_KEY ?? "ollama" : apiKey || env("MODEL_API_KEY");
 
   return new OpenAICompatibleProvider({
-    apiKey,
-    endpoint: process.env.MODEL_ENDPOINT,
+    apiKey: resolvedApiKey,
+    endpoint: endpoint ?? process.env.MODEL_ENDPOINT,
     providerName: mode
   });
 }
@@ -103,6 +104,31 @@ function renderPlan(plan) {
 }
 
 async function main() {
+  const cliArgs = process.argv.slice(2);
+  if (cliArgs.length > 0) {
+    const handled = await runProviderUtilityCommand({
+      argv: cliArgs,
+      output,
+      errorOutput: process.stderr,
+      env: process.env
+    });
+    if (handled) {
+      return;
+    }
+    if (cliArgs[0] === "help" || cliArgs[0] === "--help" || cliArgs[0] === "-h") {
+      output.write("Starcode usage:\n");
+      output.write("  starcode                      # interactive agent mode\n");
+      output.write("  starcode auth login <provider> [--api-key <key>] [--endpoint <url>] [--model <id>]\n");
+      output.write("  starcode auth logout [provider|--all]\n");
+      output.write("  starcode auth list\n");
+      output.write("  starcode models list [provider] [--endpoint <url>] [--api-key <key>]\n");
+      output.write("  starcode models use <model_id> [--provider <provider>]\n");
+      return;
+    }
+    throw new Error(`Unknown command '${cliArgs[0]}'. Run 'starcode help' for available commands.`);
+  }
+
+  const runtimeModelConfig = await resolveRuntimeModelConfig({ env: process.env });
   const sessionId = process.env.SESSION_ID ?? randomUUID();
 
   const telemetry = new TelemetryClient({
@@ -120,8 +146,12 @@ async function main() {
     retryMultiplier: Number(process.env.TELEMETRY_RETRY_MULTIPLIER ?? 2)
   });
 
-  const provider = createProvider();
-  const model = process.env.MODEL_NAME ?? "gpt-4.1-mini";
+  const provider = createProvider({
+    providerName: runtimeModelConfig.provider,
+    apiKey: runtimeModelConfig.apiKey,
+    endpoint: runtimeModelConfig.endpoint
+  });
+  const model = runtimeModelConfig.model;
   const workspaceDir = process.env.STARCODE_WORKSPACE_DIR ?? process.cwd();
   const enableStreaming = process.env.STARCODE_ENABLE_STREAMING !== "false";
   const enablePlanningMode = process.env.STARCODE_ENABLE_PLANNING_MODE === "true";

@@ -1,11 +1,11 @@
-const DEFAULT_ENDPOINTS = {
+export const DEFAULT_ENDPOINTS = {
   "openai-compatible": "https://api.openai.com/v1/chat/completions",
   openai: "https://api.openai.com/v1/chat/completions",
   moonshot: "https://api.moonshot.ai/v1/chat/completions",
   ollama: "http://127.0.0.1:11434/v1/chat/completions"
 };
 
-function normalizeProviderName(providerName) {
+export function normalizeProviderName(providerName) {
   const normalized = String(providerName ?? "openai-compatible").toLowerCase();
 
   if (normalized in DEFAULT_ENDPOINTS) {
@@ -15,7 +15,7 @@ function normalizeProviderName(providerName) {
   return "openai-compatible";
 }
 
-function resolveEndpoint(providerName, endpoint) {
+export function resolveEndpoint(providerName, endpoint) {
   if (endpoint && typeof endpoint === "string") {
     return endpoint;
   }
