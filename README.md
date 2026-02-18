@@ -113,6 +113,8 @@ Outputs:
 - `data/training/<timestamp>/behavior.jsonl`
 - `data/training/<timestamp>/manifest.json`
 - `data/training/<timestamp>/redaction-coverage.json`
+- `sft.jsonl` and `behavior.jsonl` include `quality` flags and tool trace metadata for post-training filtering.
+- `manifest.json` includes malformed-row/drop counters (`malformed_rows`, `dropped_sft`, `dropped_behavior`).
 
 ## Security and Compliance Controls
 

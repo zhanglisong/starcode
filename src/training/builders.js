@@ -1,3 +1,63 @@
+function qualityFromFlags(flags) {
+  const uniqueFlags = [...new Set(flags)];
+  const score = Math.max(0, Number((1 - uniqueFlags.length * 0.15).toFixed(2)));
+  return {
+    ok: uniqueFlags.length === 0,
+    score,
+    flags: uniqueFlags
+  };
+}
+
+function buildSftQuality(event, assistantText) {
+  const flags = [];
+  const payload = event.payload ?? {};
+  const usage = payload.usage ?? {};
+  const toolResults = Array.isArray(payload.toolResults) ? payload.toolResults : [];
+
+  if (payload.status && payload.status !== "ok") {
+    flags.push("turn_status_not_ok");
+  }
+  if (!Number.isFinite(payload.latency_ms)) {
+    flags.push("missing_latency");
+  }
+  if (!Number.isFinite(usage.total_tokens)) {
+    flags.push("missing_usage_total_tokens");
+  }
+  if (toolResults.some((result) => result?.ok === false)) {
+    flags.push("tool_failure_present");
+  }
+  if (String(assistantText).trim().length < 20) {
+    flags.push("short_assistant_response");
+  }
+
+  return qualityFromFlags(flags);
+}
+
+function buildBehaviorQuality(event) {
+  const payload = event.payload ?? {};
+  const flags = [];
+  const usage = payload.usage ?? {};
+  const toolResults = Array.isArray(payload.tool_results) ? payload.tool_results : [];
+
+  if (event.event_type === "model.error" || payload.error) {
+    flags.push("model_error");
+  }
+  if (event.event_type === "model.behavior" && !payload.finish_reason) {
+    flags.push("missing_finish_reason");
+  }
+  if (!Number.isFinite(usage.total_tokens)) {
+    flags.push("missing_usage_total_tokens");
+  }
+  if (!Number.isFinite(payload.latency_ms)) {
+    flags.push("missing_latency");
+  }
+  if (toolResults.some((result) => result?.ok === false)) {
+    flags.push("tool_failure_present");
+  }
+
+  return qualityFromFlags(flags);
+}
+
 export function buildSftRecord(event) {
   if (event.event_type !== "conversation.turn") {
     return null;
@@ -26,7 +86,12 @@ export function buildSftRecord(event) {
       latency_ms: event.payload?.latency_ms,
       latency_breakdown: event.payload?.latency_breakdown,
       usage: event.payload?.usage
-    }
+    },
+    tool_trace: {
+      decisions: event.payload?.tools ?? [],
+      results: event.payload?.toolResults ?? []
+    },
+    quality: buildSftQuality(event, assistant.content)
   };
 }
 
@@ -55,6 +120,7 @@ export function buildBehaviorRecord(event) {
     latency_ms: event.payload?.latency_ms,
     latency_breakdown: event.payload?.latency_breakdown,
     error: event.payload?.error ?? null,
-    occurred_at: event.occurred_at
+    occurred_at: event.occurred_at,
+    quality: buildBehaviorQuality(event)
   };
 }

@@ -16,7 +16,9 @@ const base = {
     response: { role: "assistant", content: "Here are tests." },
     model: "gpt-4.1-mini",
     latency_ms: 100,
-    usage: { total_tokens: 10 }
+    usage: { total_tokens: 10 },
+    tools: [{ function: { name: "read_file" } }],
+    toolResults: [{ tool_call_id: "call_1", ok: true }]
   }
 };
 
@@ -25,6 +27,10 @@ test("buildSftRecord maps conversation event", () => {
   assert.equal(row.messages[0].role, "user");
   assert.equal(row.messages[1].role, "assistant");
   assert.equal(row.org_id, "acme");
+  assert.equal(Array.isArray(row.tool_trace.decisions), true);
+  assert.equal(Array.isArray(row.tool_trace.results), true);
+  assert.equal(typeof row.quality.score, "number");
+  assert.equal(Array.isArray(row.quality.flags), true);
 });
 
 test("buildBehaviorRecord maps model behavior", () => {
@@ -47,4 +53,6 @@ test("buildBehaviorRecord maps model behavior", () => {
   assert.equal(row.model, "m1");
   assert.equal(Array.isArray(row.tool_results), true);
   assert.equal(row.tool_results.length, 1);
+  assert.equal(typeof row.quality.score, "number");
+  assert.equal(Array.isArray(row.quality.flags), true);
 });

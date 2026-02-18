@@ -20,7 +20,7 @@ test("exportDataset writes redacted training rows and redaction coverage report"
 
   await fs.mkdir(sourceDir, { recursive: true });
 
-  const event = {
+  const conversationEvent = {
     event_id: "evt-export-1",
     schema_version: 1,
     event_type: "conversation.turn",
@@ -33,14 +33,38 @@ test("exportDataset writes redacted training rows and redaction coverage report"
     trace_id: "trace-1",
     payload: {
       request: { role: "user", content: "email alice@example.com and use sk-1234567890abcdefghijkl" },
-      response: { role: "assistant", content: "ok" },
-      model: "mock"
+      response: { role: "assistant", content: "Done. I wrote the file and validated the result." },
+      model: "mock",
+      tools: [{ id: "call_1", function: { name: "write_file", arguments: "{}" } }],
+      toolResults: [{ tool_call_id: "call_1", name: "write_file", ok: true }]
+    }
+  };
+
+  const behaviorEvent = {
+    event_id: "evt-export-2",
+    schema_version: 1,
+    event_type: "model.behavior",
+    occurred_at: "2026-02-18T00:00:02.000Z",
+    org_id: "acme",
+    engineer_id: "alice",
+    team_id: "platform",
+    project_id: "starcode",
+    session_id: "session-1",
+    trace_id: "trace-1",
+    payload: {
+      provider: "mock",
+      model: "mock",
+      finish_reason: "stop",
+      tool_decisions: [{ name: "write_file" }],
+      tool_results: [{ name: "write_file", ok: true }],
+      usage: { total_tokens: 42 },
+      latency_ms: 100
     }
   };
 
   await fs.writeFile(
     path.join(sourceDir, "conversation.turn.jsonl"),
-    `${JSON.stringify(event)}\n`,
+    `${JSON.stringify(conversationEvent)}\n${JSON.stringify(behaviorEvent)}\n{"bad_json":\n`,
     "utf8"
   );
 
@@ -64,8 +88,32 @@ test("exportDataset writes redacted training rows and redaction coverage report"
   assert.equal(sftRaw.includes("sk-1234567890abcdefghijkl"), false);
   assert.equal(sftRaw.includes("[REDACTED_EMAIL]"), true);
   assert.equal(sftRaw.includes("[REDACTED_API_KEY]"), true);
+  const sftRows = sftRaw
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  assert.equal(sftRows.length, 1);
+  assert.equal(Array.isArray(sftRows[0].tool_trace?.decisions), true);
+  assert.equal(Array.isArray(sftRows[0].tool_trace?.results), true);
+  assert.equal(typeof sftRows[0].quality?.score, "number");
+
+  const behaviorRaw = await fs.readFile(path.join(exportPath, "behavior.jsonl"), "utf8");
+  const behaviorRows = behaviorRaw
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  assert.equal(behaviorRows.length, 1);
+  assert.equal(Array.isArray(behaviorRows[0].tool_results), true);
+  assert.equal(typeof behaviorRows[0].quality?.score, "number");
 
   const coverage = JSON.parse(await fs.readFile(path.join(exportPath, "redaction-coverage.json"), "utf8"));
   assert.equal(coverage.enabled, true);
   assert.equal(coverage.total_redactions >= 2, true);
+
+  const manifest = JSON.parse(await fs.readFile(path.join(exportPath, "manifest.json"), "utf8"));
+  assert.equal(manifest.counts.sft, 1);
+  assert.equal(manifest.counts.behavior, 1);
+  assert.equal(manifest.counts.malformed_rows, 1);
 });
