@@ -14,7 +14,8 @@
     "export:model-io": "node ./src/debug/exportModelIoTranscript.js",
     "test": "node --test",
     "eval:lite": "node ./src/eval/runEvalLite.js",
-    "eval:gate": "node ./src/eval/releaseGate.js"
+    "eval:gate": "node ./src/eval/releaseGate.js",
+    "debug:model-io": "node ./src/debug/viewModelIoTrace.js"
   },
   "engines": {
     "node": ">=20"

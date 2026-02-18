@@ -95,6 +95,9 @@ Model I/O step tracing:
 - Set `STARCODE_DEBUG_MODEL_IO=1` to record loop-level agent <> model messages and tool execution steps.
 - Optional output path: `STARCODE_DEBUG_MODEL_IO_FILE` (default `.telemetry/model-io.jsonl` under workspace root).
 - Warning: this debug log includes raw prompts/responses/tool payloads.
+- Inspect traces with filters:
+  - `npm run debug:model-io -- --trace-id <trace_id> --round 0 --phase model_request,model_response`
+  - `npm run debug:model-io -- --format jsonl --limit 20`
 - Export round-by-round markdown transcript:
   - `npm run export:model-io`
   - Optional env: `TRACE_ID=<trace_id> STARCODE_MODEL_IO_INPUT=<path> STARCODE_MODEL_IO_OUTPUT=<path>`
