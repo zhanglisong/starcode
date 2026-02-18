@@ -127,3 +127,22 @@ Current eval-lite scope:
 - 12 objective tasks based on file operations and tool-use behavior.
 - Scoring checks: file content/state, response keywords, minimum tool-call count.
 - Latency breakdown summary: model time vs tool time vs other overhead.
+
+## Provider Profiles (SC-001)
+
+`MODEL_PROVIDER` controls default endpoint/auth behavior and compatibility constraints:
+
+- `moonshot`
+  - Default endpoint: `https://api.moonshot.ai/v1/chat/completions`
+  - For `MODEL_NAME=kimi-k2.5`, Starcode auto-forces:
+    - `temperature=1`
+    - `top_p=0.95`
+- `ollama`
+  - Default endpoint: `http://127.0.0.1:11434/v1/chat/completions`
+  - Authorization header is omitted by default.
+  - `MODEL_API_KEY` is optional.
+- `openai-compatible` (or `openai`)
+  - Default endpoint: `https://api.openai.com/v1/chat/completions`
+  - Uses passed sampling params directly.
+
+You can always override endpoint with `MODEL_ENDPOINT`.

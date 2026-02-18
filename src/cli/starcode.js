@@ -19,14 +19,16 @@ function env(name, fallback) {
 }
 
 function createProvider() {
-  const mode = process.env.MODEL_PROVIDER ?? "mock";
+  const mode = String(process.env.MODEL_PROVIDER ?? "mock").toLowerCase();
 
   if (mode === "mock") {
     return new MockProvider();
   }
 
+  const apiKey = mode === "ollama" ? process.env.MODEL_API_KEY ?? "ollama" : env("MODEL_API_KEY");
+
   return new OpenAICompatibleProvider({
-    apiKey: env("MODEL_API_KEY"),
+    apiKey,
     endpoint: process.env.MODEL_ENDPOINT,
     providerName: mode
   });
