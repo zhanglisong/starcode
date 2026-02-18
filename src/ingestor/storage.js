@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { redactSensitiveData } from "../telemetry/redaction.js";
 
 function safeSegment(value) {
   return String(value ?? "unknown").replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -104,22 +105,24 @@ export class IngestStorage {
     const acceptedIds = [];
 
     for (const event of events) {
-      if (this.seen.has(event.event_id)) {
+      const sanitizedEvent = redactSensitiveData(event);
+
+      if (this.seen.has(sanitizedEvent.event_id)) {
         continue;
       }
 
-      this.remember(event.event_id);
-      acceptedIds.push(event.event_id);
+      this.remember(sanitizedEvent.event_id);
+      acceptedIds.push(sanitizedEvent.event_id);
 
-      const org = safeSegment(event.org_id);
-      const day = safeSegment(getDay(event.occurred_at));
-      const type = safeSegment(event.event_type);
+      const org = safeSegment(sanitizedEvent.org_id);
+      const day = safeSegment(getDay(sanitizedEvent.occurred_at));
+      const type = safeSegment(sanitizedEvent.event_type);
       const key = `${org}/${day}/${type}`;
 
       if (!buckets.has(key)) {
         buckets.set(key, []);
       }
-      buckets.get(key).push(event);
+      buckets.get(key).push(sanitizedEvent);
     }
 
     for (const [key, list] of buckets.entries()) {

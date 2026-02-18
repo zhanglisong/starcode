@@ -91,3 +91,28 @@ test("summarizeMetadata reports org/team/engineer aggregation", async () => {
     { id: "beta", events: 1 }
   ]);
 });
+
+test("writeEvents stores redacted payload content", async () => {
+  const dir = await makeTempDir();
+  const storage = new IngestStorage(dir);
+
+  const occurredAt = "2026-02-18T00:00:00.000Z";
+  await storage.writeEvents([
+    {
+      ...makeEvent({ eventId: "evt-redact", occurredAt }),
+      payload: {
+        request: { content: "email me at alice@example.com" },
+        response: { content: "token sk-1234567890abcdefghijkl" }
+      }
+    }
+  ]);
+
+  const day = occurredAt.slice(0, 10);
+  const filePath = path.join(dir, "acme", day, "conversation.turn.jsonl");
+  const raw = await fs.readFile(filePath, "utf8");
+
+  assert.equal(raw.includes("alice@example.com"), false);
+  assert.equal(raw.includes("sk-1234567890abcdefghijkl"), false);
+  assert.equal(raw.includes("[REDACTED_EMAIL]"), true);
+  assert.equal(raw.includes("[REDACTED_API_KEY]"), true);
+});

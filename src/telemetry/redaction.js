@@ -36,30 +36,82 @@ const RULES = [
   }
 ];
 
-function redactString(value) {
-  let output = value;
-  for (const rule of RULES) {
-    output = output.replace(rule.regex, rule.replacement);
+function ensureStatsShape(stats) {
+  if (!stats || typeof stats !== "object") {
+    return createRedactionStats();
   }
+
+  if (!stats.rules || typeof stats.rules !== "object") {
+    stats.rules = {};
+  }
+
+  if (!Number.isFinite(stats.total_redactions)) {
+    stats.total_redactions = 0;
+  }
+
+  for (const rule of RULES) {
+    if (!Number.isFinite(stats.rules[rule.key])) {
+      stats.rules[rule.key] = 0;
+    }
+  }
+
+  return stats;
+}
+
+function redactString(value, stats) {
+  let output = value;
+  const targetStats = ensureStatsShape(stats);
+
+  for (const rule of RULES) {
+    output = output.replace(rule.regex, () => {
+      targetStats.total_redactions += 1;
+      targetStats.rules[rule.key] += 1;
+      return rule.replacement;
+    });
+  }
+
   return output;
 }
 
-export function redactSensitiveData(value) {
+export function createRedactionStats() {
+  return {
+    total_redactions: 0,
+    rules: Object.fromEntries(RULES.map((rule) => [rule.key, 0]))
+  };
+}
+
+export function summarizeRedactionStats(stats) {
+  const shaped = ensureStatsShape(stats);
+
+  return {
+    total_redactions: shaped.total_redactions,
+    rules: Object.entries(shaped.rules)
+      .map(([key, count]) => ({ key, count }))
+      .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key))
+  };
+}
+
+export function redactSensitiveDataWithStats(value, stats = createRedactionStats()) {
   if (typeof value === "string") {
-    return redactString(value);
+    return redactString(value, stats);
   }
 
   if (Array.isArray(value)) {
-    return value.map((item) => redactSensitiveData(item));
+    return value.map((item) => redactSensitiveDataWithStats(item, stats));
   }
 
   if (value && typeof value === "object") {
     const output = {};
     for (const [k, v] of Object.entries(value)) {
-      output[k] = redactSensitiveData(v);
+      output[k] = redactSensitiveDataWithStats(v, stats);
     }
     return output;
   }
 
   return value;
+}
+
+export function redactSensitiveData(value) {
+  const stats = createRedactionStats();
+  return redactSensitiveDataWithStats(value, stats);
 }

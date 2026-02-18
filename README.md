@@ -101,6 +101,7 @@ Outputs:
 - `data/training/<timestamp>/sft.jsonl`
 - `data/training/<timestamp>/behavior.jsonl`
 - `data/training/<timestamp>/manifest.json`
+- `data/training/<timestamp>/redaction-coverage.json`
 
 ## Security and Compliance Controls
 
@@ -108,6 +109,7 @@ Outputs:
 - Retry/backoff settings are configurable via `TELEMETRY_RETRY_BASE_MS`, `TELEMETRY_RETRY_MAX_MS`, `TELEMETRY_RETRY_MULTIPLIER`.
 - API-key enforcement is configurable in ingestor (`INGEST_API_KEYS`).
 - Data is stored in JSONL for auditability and deterministic exports.
+- Training export redaction is enabled by default (`TRAINING_REDACT=true`) with per-run coverage report.
 - Add your own legal/compliance policy gates before using export data for post-training.
 
 ## Tests

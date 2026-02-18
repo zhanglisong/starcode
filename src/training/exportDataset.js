@@ -2,10 +2,16 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { buildBehaviorRecord, buildSftRecord } from "./builders.js";
+import {
+  createRedactionStats,
+  redactSensitiveDataWithStats,
+  summarizeRedactionStats
+} from "../telemetry/redaction.js";
 
 const INPUT_DIR = process.env.TRAINING_INPUT_DIR ?? "data/ingested";
 const OUTPUT_DIR = process.env.TRAINING_OUTPUT_DIR ?? "data/training";
 const ORG_FILTER = process.env.TRAINING_ORG_ID ?? "";
+const TRAINING_REDACT = process.env.TRAINING_REDACT !== "false";
 
 async function readJsonl(filePath) {
   const raw = await fs.readFile(filePath, "utf8");
@@ -72,20 +78,23 @@ async function main() {
 
   const sftRows = [];
   const behaviorRows = [];
+  const redactionStats = createRedactionStats();
 
   for (const file of files) {
     const events = await readJsonl(file);
     for (const event of events) {
-      if (!includeEvent(event)) {
+      const normalizedEvent = TRAINING_REDACT ? redactSensitiveDataWithStats(event, redactionStats) : event;
+
+      if (!includeEvent(normalizedEvent)) {
         continue;
       }
 
-      const sft = buildSftRecord(event);
+      const sft = buildSftRecord(normalizedEvent);
       if (sft) {
         sftRows.push(sft);
       }
 
-      const behavior = buildBehaviorRecord(event);
+      const behavior = buildBehaviorRecord(normalizedEvent);
       if (behavior) {
         behaviorRows.push(behavior);
       }
@@ -97,15 +106,37 @@ async function main() {
 
   const sftFile = path.join(exportDir, "sft.jsonl");
   const behaviorFile = path.join(exportDir, "behavior.jsonl");
+  const redactionReportFile = path.join(exportDir, "redaction-coverage.json");
 
   await writeJsonl(sftFile, sftRows);
   await writeJsonl(behaviorFile, behaviorRows);
+
+  const redactionSummary = summarizeRedactionStats(redactionStats);
+
+  await fs.writeFile(
+    redactionReportFile,
+    `${JSON.stringify(
+      {
+        generated_at: new Date().toISOString(),
+        enabled: TRAINING_REDACT,
+        ...redactionSummary
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
 
   const manifest = {
     generated_at: new Date().toISOString(),
     input_dir: INPUT_DIR,
     output_dir: exportDir,
     org_filter: ORG_FILTER || null,
+    redaction: {
+      enabled: TRAINING_REDACT,
+      total_redactions: redactionSummary.total_redactions,
+      coverage_file: redactionReportFile
+    },
     counts: {
       sft: sftRows.length,
       behavior: behaviorRows.length
@@ -116,6 +147,7 @@ async function main() {
 
   process.stdout.write(`Export complete\n`);
   process.stdout.write(`sft=${sftRows.length} behavior=${behaviorRows.length}\n`);
+  process.stdout.write(`redactions=${redactionSummary.total_redactions}\n`);
   process.stdout.write(`output=${exportDir}\n`);
 }
 
