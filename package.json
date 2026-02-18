@@ -12,7 +12,8 @@
     "start:ingestor": "node ./src/ingestor/server.js",
     "export:training": "node ./src/training/exportDataset.js",
     "export:model-io": "node ./src/debug/exportModelIoTranscript.js",
-    "test": "node --test"
+    "test": "node --test",
+    "eval:lite": "node ./src/eval/runEvalLite.js"
   },
   "engines": {
     "node": ">=20"

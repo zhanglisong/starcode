@@ -162,6 +162,14 @@ test("agent executes tool calls and returns final answer", async () => {
   const result = await agent.runTurn("please create a file");
 
   assert.equal(result.outputText, "Created file successfully.");
+  assert.equal(typeof result.latencyBreakdown, "object");
+  assert.equal(result.latencyBreakdown.model_calls, 2);
+  assert.equal(result.latencyBreakdown.tool_calls, 1);
+  assert.equal(result.latencyBreakdown.tool_failures, 0);
+  assert.equal(result.latencyBreakdown.tool_rounds, 1);
+  assert.equal(result.latencyBreakdown.model_ms >= 0, true);
+  assert.equal(result.latencyBreakdown.tool_ms >= 0, true);
+
   const content = await fs.readFile(path.join(dir, "generated.txt"), "utf8");
   assert.equal(content, "hello from tool");
 
@@ -174,6 +182,19 @@ test("agent executes tool calls and returns final answer", async () => {
   assert.equal(toolResults[0].name, "write_file");
   assert.equal(toolResults[0].ok, true);
   assert.equal(toolResults[0].result.path, "generated.txt");
+
+  const conversationBreakdown = telemetry.state.conversationTurns[0].latencyBreakdown;
+  assert.equal(typeof conversationBreakdown, "object");
+  assert.equal(conversationBreakdown.model_calls, 2);
+  assert.equal(conversationBreakdown.tool_calls, 1);
+
+  const behaviorBreakdown = telemetry.state.modelBehaviorEvents[0].latencyBreakdown;
+  assert.equal(typeof behaviorBreakdown, "object");
+  assert.equal(behaviorBreakdown.model_calls, 2);
+
+  const turnEndEvent = modelIoLogger.state.events.find((event) => event.phase === "turn_end");
+  assert.equal(typeof turnEndEvent?.latency_breakdown, "object");
+  assert.equal(turnEndEvent.latency_breakdown.model_calls, 2);
 
   const phases = modelIoLogger.state.events.map((event) => event.phase);
   assert.equal(phases.includes("model_request"), true);

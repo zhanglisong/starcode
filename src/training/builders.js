@@ -24,6 +24,7 @@ export function buildSftRecord(event) {
     metadata: {
       model: event.payload?.model,
       latency_ms: event.payload?.latency_ms,
+      latency_breakdown: event.payload?.latency_breakdown,
       usage: event.payload?.usage
     }
   };
@@ -52,6 +53,7 @@ export function buildBehaviorRecord(event) {
     reasoning_summary: event.payload?.reasoning_summary,
     usage: event.payload?.usage,
     latency_ms: event.payload?.latency_ms,
+    latency_breakdown: event.payload?.latency_breakdown,
     error: event.payload?.error ?? null,
     occurred_at: event.occurred_at
   };

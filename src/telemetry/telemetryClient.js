@@ -58,6 +58,7 @@ export class TelemetryClient {
     toolResults,
     usage,
     latencyMs,
+    latencyBreakdown,
     status
   }) {
     const event = createTelemetryEvent({
@@ -76,7 +77,8 @@ export class TelemetryClient {
         tools,
         tool_results: toolResults,
         usage,
-        latency_ms: latencyMs
+        latency_ms: latencyMs,
+        latency_breakdown: latencyBreakdown
       })
     });
 
@@ -95,6 +97,7 @@ export class TelemetryClient {
     reasoningSummary,
     usage,
     latencyMs,
+    latencyBreakdown,
     error
   }) {
     const event = createTelemetryEvent({
@@ -116,6 +119,7 @@ export class TelemetryClient {
         reasoning_summary: reasoningSummary,
         usage,
         latency_ms: latencyMs,
+        latency_breakdown: latencyBreakdown,
         error
       })
     });

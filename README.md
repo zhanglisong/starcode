@@ -96,3 +96,34 @@ node --test
 2. Encrypt telemetry at rest.
 3. Add RBAC and immutable audit logs for dataset exports.
 4. Add policy filters and review workflow before training jobs.
+
+## Eval-Lite Baseline (Step 1)
+
+Use eval-lite to capture a baseline pass rate/latency before new parity work.
+
+Run with current defaults (mock provider):
+
+```bash
+npm run eval:lite
+```
+
+Run with a real provider (example OpenAI-compatible endpoint):
+
+```bash
+MODEL_PROVIDER=openai-compatible \
+MODEL_ENDPOINT=https://api.moonshot.ai/v1/chat/completions \
+MODEL_API_KEY=$KIMI_API_KEY \
+MODEL_NAME=kimi-k2.5 \
+MODEL_TEMPERATURE=1 \
+MODEL_TOP_P=0.95 \
+npm run eval:lite
+```
+
+Outputs:
+- JSON report: `tmp/eval-lite/reports/<run-id>.json`
+- Markdown summary: `tmp/eval-lite/reports/<run-id>.md`
+
+Current eval-lite scope:
+- 12 objective tasks based on file operations and tool-use behavior.
+- Scoring checks: file content/state, response keywords, minimum tool-call count.
+- Latency breakdown summary: model time vs tool time vs other overhead.

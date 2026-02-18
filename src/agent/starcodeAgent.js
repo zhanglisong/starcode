@@ -58,6 +58,38 @@ function parseToolArguments(rawArguments) {
   }
 }
 
+function createLatencyBreakdown({
+  totalMs,
+  modelMs,
+  toolMs,
+  modelCalls,
+  toolCalls,
+  toolFailures,
+  toolRounds
+}) {
+  const safeTotal = Number.isFinite(totalMs) ? Math.max(0, Math.round(totalMs)) : 0;
+  const safeModelMs = Number.isFinite(modelMs) ? Math.max(0, Math.round(modelMs)) : 0;
+  const safeToolMs = Number.isFinite(toolMs) ? Math.max(0, Math.round(toolMs)) : 0;
+  const safeModelCalls = Number.isFinite(modelCalls) ? Math.max(0, modelCalls) : 0;
+  const safeToolCalls = Number.isFinite(toolCalls) ? Math.max(0, toolCalls) : 0;
+  const safeToolFailures = Number.isFinite(toolFailures) ? Math.max(0, toolFailures) : 0;
+  const safeToolRounds = Number.isFinite(toolRounds) ? Math.max(0, toolRounds) : 0;
+  const otherMs = Math.max(0, safeTotal - safeModelMs - safeToolMs);
+
+  return {
+    total_ms: safeTotal,
+    model_ms: safeModelMs,
+    tool_ms: safeToolMs,
+    other_ms: otherMs,
+    model_calls: safeModelCalls,
+    tool_calls: safeToolCalls,
+    tool_failures: safeToolFailures,
+    tool_rounds: safeToolRounds,
+    model_avg_ms: safeModelCalls ? Math.round(safeModelMs / safeModelCalls) : 0,
+    tool_avg_ms: safeToolCalls ? Math.round(safeToolMs / safeToolCalls) : 0
+  };
+}
+
 export class StarcodeAgent {
   constructor({
     provider,
@@ -101,6 +133,14 @@ export class StarcodeAgent {
     let latestUsage = {};
     let latestFinishReason = "unknown";
     let finalAssistantText = "";
+    const timing = {
+      modelMs: 0,
+      toolMs: 0,
+      modelCalls: 0,
+      toolCalls: 0,
+      toolFailures: 0,
+      toolRounds: 0
+    };
 
     try {
       const tools = this.localTools?.getToolDefinitions?.() ?? [];
@@ -115,14 +155,22 @@ export class StarcodeAgent {
           tools
         });
 
-        const result = await this.provider.complete({
-          model: this.model,
-          messages: this.messages,
-          temperature: this.temperature,
-          topP: this.topP,
-          maxTokens: this.maxTokens,
-          tools
-        });
+        const modelStartedAt = Date.now();
+        let result;
+
+        try {
+          result = await this.provider.complete({
+            model: this.model,
+            messages: this.messages,
+            temperature: this.temperature,
+            topP: this.topP,
+            maxTokens: this.maxTokens,
+            tools
+          });
+        } finally {
+          timing.modelCalls += 1;
+          timing.modelMs += Date.now() - modelStartedAt;
+        }
 
         latestUsage = result.usage ?? latestUsage;
         latestFinishReason = result.finishReason ?? latestFinishReason;
@@ -137,7 +185,8 @@ export class StarcodeAgent {
             role: "assistant",
             content: normalizeContent(result.outputText)
           },
-          tool_calls: result.toolCalls ?? []
+          tool_calls: result.toolCalls ?? [],
+          model_latency_ms: Date.now() - modelStartedAt
         });
 
         if (!result.toolCalls?.length || !this.localTools) {
@@ -147,6 +196,7 @@ export class StarcodeAgent {
           break;
         }
 
+        timing.toolRounds += 1;
         allToolCalls.push(...result.toolCalls);
         this.messages.push(buildAssistantMessageFromResult(result, true));
 
@@ -167,6 +217,9 @@ export class StarcodeAgent {
           try {
             const toolResult = await this.localTools.executeToolCall(call);
             const toolDurationMs = Date.now() - toolStartedAt;
+            timing.toolMs += toolDurationMs;
+            timing.toolCalls += 1;
+
             allToolResults.push({
               tool_call_id: call?.id ?? null,
               name: toolName,
@@ -194,6 +247,10 @@ export class StarcodeAgent {
             });
           } catch (error) {
             const toolDurationMs = Date.now() - toolStartedAt;
+            timing.toolMs += toolDurationMs;
+            timing.toolCalls += 1;
+            timing.toolFailures += 1;
+
             allToolResults.push({
               tool_call_id: call?.id ?? null,
               name: toolName,
@@ -232,6 +289,15 @@ export class StarcodeAgent {
       }
 
       const latencyMs = Date.now() - startedAt;
+      const latencyBreakdown = createLatencyBreakdown({
+        totalMs: latencyMs,
+        modelMs: timing.modelMs,
+        toolMs: timing.toolMs,
+        modelCalls: timing.modelCalls,
+        toolCalls: timing.toolCalls,
+        toolFailures: timing.toolFailures,
+        toolRounds: timing.toolRounds
+      });
       const assistantMessage = { role: "assistant", content: finalAssistantText };
 
       await this.telemetry.captureConversationTurn({
@@ -243,6 +309,7 @@ export class StarcodeAgent {
         toolResults: allToolResults,
         usage: latestUsage,
         latencyMs,
+        latencyBreakdown,
         status: "ok"
       });
 
@@ -264,7 +331,8 @@ export class StarcodeAgent {
         toolResults: allToolResults,
         reasoningSummary: "Behavior data captured from runtime instrumentation.",
         usage: latestUsage,
-        latencyMs
+        latencyMs,
+        latencyBreakdown
       });
 
       const flush = await this.telemetry.flush();
@@ -274,7 +342,8 @@ export class StarcodeAgent {
         trace_id: traceId,
         output_text: finalAssistantText,
         latency_ms: latencyMs,
-        usage: latestUsage
+        usage: latestUsage,
+        latency_breakdown: latencyBreakdown
       });
 
       return {
@@ -282,15 +351,26 @@ export class StarcodeAgent {
         outputText: finalAssistantText,
         usage: latestUsage,
         latencyMs,
+        latencyBreakdown,
         flush
       };
     } catch (error) {
       const latencyMs = Date.now() - startedAt;
+      const latencyBreakdown = createLatencyBreakdown({
+        totalMs: latencyMs,
+        modelMs: timing.modelMs,
+        toolMs: timing.toolMs,
+        modelCalls: timing.modelCalls,
+        toolCalls: timing.toolCalls,
+        toolFailures: timing.toolFailures,
+        toolRounds: timing.toolRounds
+      });
 
       await this.logModelIo({
         phase: "turn_error",
         trace_id: traceId,
         latency_ms: latencyMs,
+        latency_breakdown: latencyBreakdown,
         error: {
           name: error.name,
           message: error.message
@@ -310,7 +390,8 @@ export class StarcodeAgent {
           name: error.name,
           message: error.message
         },
-        latencyMs
+        latencyMs,
+        latencyBreakdown
       });
 
       await this.telemetry.flush();
