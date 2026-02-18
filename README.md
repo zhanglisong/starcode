@@ -16,7 +16,7 @@ It supports company-wide aggregation across many engineers and exports post-trai
 1. Agent CLI (`/Users/huizhang/code/starcode/src/cli/starcode.js`)
 - Interactive coding agent runtime.
 - Uses provider abstraction (`mock` or OpenAI-compatible).
-- Executes local file tools (`list_files`, `read_file`, `write_file`) through model tool-calls.
+- Executes local workspace tools through model tool-calls (`list_files`, `glob_files`, `grep_files`, `read_file`, `write_file`, `create_file`, `edit_file`, `replace_in_file`, `insert_in_file`, `patch_file`, `move_file`, `delete_file`).
 - Emits telemetry for every turn.
 
 2. Telemetry SDK (`/Users/huizhang/code/starcode/src/telemetry/*`)
