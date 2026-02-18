@@ -60,6 +60,13 @@ node /Users/huizhang/code/starcode/src/ingestor/server.js
 node /Users/huizhang/code/starcode/src/cli/starcode.js
 ```
 
+Slash workflow commands (SC-017):
+- `/fix <issue>`: deterministic fix workflow (inspect, patch, verify, summarize).
+- `/test [command]`: deterministic test workflow (default `npm test`).
+- `/explain <target>`: deterministic explanation workflow with file-backed context.
+- `/commit [message]`: deterministic commit workflow; without a message, Starcode proposes one and stops.
+- `/help`: show available slash commands.
+
 Tool workspace boundary:
 - Set `STARCODE_WORKSPACE_DIR` to limit read/write/list operations to one root directory.
 - Default is current working directory when launching the CLI.

@@ -10,6 +10,7 @@ import { StarcodeAgent } from "../agent/starcodeAgent.js";
 import { LocalFileTools } from "../tools/localFileTools.js";
 import { ModelIoLogger } from "../telemetry/modelIoLogger.js";
 import { GitContextProvider } from "../context/gitContextProvider.js";
+import { parseSlashCommand, renderSlashHelpText } from "./commandFlows.js";
 
 function env(name, fallback) {
   const v = process.env[name] ?? fallback;
@@ -154,6 +155,7 @@ async function main() {
   if (modelIoDebugEnabled) {
     output.write(`model_io_debug=on file=${modelIoFilePath}\n`);
   }
+  output.write("Use /help for workflow commands (/fix, /test, /explain, /commit).\n");
 
   while (true) {
     const rawLine = await nextLine(rl);
@@ -171,8 +173,23 @@ async function main() {
       break;
     }
 
+    const slashCommand = parseSlashCommand(line);
+    if (slashCommand?.kind === "help") {
+      output.write(`${renderSlashHelpText()}\n`);
+      continue;
+    }
+    if (slashCommand?.kind === "unknown") {
+      output.write(`error> unknown slash command '/${slashCommand.command || ""}'. Type /help.\n`);
+      continue;
+    }
+
+    const turnInput = slashCommand?.kind === "command" ? slashCommand.prompt : line;
+
     try {
-      const turn = await agent.runTurn(line);
+      if (slashCommand?.kind === "command") {
+        output.write(`workflow> /${slashCommand.command}${slashCommand.args ? ` ${slashCommand.args}` : ""}\n`);
+      }
+      const turn = await agent.runTurn(turnInput);
       output.write(`assistant> ${turn.outputText}\n`);
       output.write(`trace_id=${turn.traceId} latency_ms=${turn.latencyMs} flushed=${turn.flush.flushed}\n`);
     } catch (error) {
