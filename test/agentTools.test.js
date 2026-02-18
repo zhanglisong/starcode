@@ -331,6 +331,30 @@ class StreamFallbackProvider {
   }
 }
 
+class EchoHistoryProvider {
+  constructor() {
+    this.providerName = "echo-history";
+    this.received = [];
+  }
+
+  async complete({ messages }) {
+    this.received.push(messages.map((message) => ({ ...message })));
+    const lastUser = [...messages].reverse().find((message) => message.role === "user");
+    const content = `ack: ${lastUser?.content ?? ""}`;
+    return {
+      outputText: content,
+      message: {
+        role: "assistant",
+        content
+      },
+      finishReason: "stop",
+      toolCalls: [],
+      usage: { total_tokens: 7 },
+      raw: {}
+    };
+  }
+}
+
 function telemetryStub() {
   const state = {
     conversationTurns: [],
@@ -615,4 +639,45 @@ test("agent falls back to non-streaming mode when provider stream is unsupported
 
   const fallbackEvent = modelIoLogger.state.events.find((event) => event.phase === "stream_fallback");
   assert.equal(typeof fallbackEvent?.reason, "string");
+});
+
+test("agent summarizes older session turns and keeps recent context", async () => {
+  const provider = new EchoHistoryProvider();
+  const modelIoLogger = modelIoLoggerStub();
+
+  const agent = new StarcodeAgent({
+    provider,
+    telemetry: telemetryStub(),
+    modelIoLogger,
+    localTools: null,
+    model: "stub-model",
+    systemPrompt: "You are a test agent.",
+    enableSessionSummary: true,
+    sessionSummaryTriggerMessages: 4,
+    sessionSummaryKeepRecent: 2
+  });
+
+  await agent.runTurn("task one");
+  await agent.runTurn("task two");
+  const turnThree = await agent.runTurn("task three");
+  await agent.runTurn("task four");
+
+  assert.equal(typeof turnThree.sessionSummary, "object");
+  const summaryMessage = agent.messages.find(
+    (message) => message.role === "system" && String(message.content).startsWith("Session memory summary:")
+  );
+  assert.equal(Boolean(summaryMessage), true);
+  assert.match(summaryMessage.content, /task one/);
+  assert.match(summaryMessage.content, /task two/);
+
+  const lastRequestMessages = provider.received.at(-1) ?? [];
+  assert.equal(
+    lastRequestMessages.some(
+      (message) => message.role === "system" && String(message.content).startsWith("Session memory summary:")
+    ),
+    true
+  );
+
+  const summaryEvent = modelIoLogger.state.events.find((event) => event.phase === "session_summary_update");
+  assert.equal(Boolean(summaryEvent), true);
 });

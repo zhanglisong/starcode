@@ -89,6 +89,9 @@ async function main() {
   const model = process.env.MODEL_NAME ?? "gpt-4.1-mini";
   const workspaceDir = process.env.STARCODE_WORKSPACE_DIR ?? process.cwd();
   const enableStreaming = process.env.STARCODE_ENABLE_STREAMING !== "false";
+  const enableSessionSummary = process.env.STARCODE_ENABLE_SESSION_SUMMARY !== "false";
+  const sessionSummaryTriggerMessages = Number(process.env.STARCODE_SESSION_SUMMARY_TRIGGER_MESSAGES ?? 18);
+  const sessionSummaryKeepRecent = Number(process.env.STARCODE_SESSION_SUMMARY_KEEP_RECENT ?? 8);
   const localTools = new LocalFileTools({
     baseDir: workspaceDir,
     enableShellTool: process.env.STARCODE_ENABLE_SHELL_TOOL !== "false",
@@ -135,7 +138,10 @@ async function main() {
     temperature: Number(process.env.MODEL_TEMPERATURE ?? 0.2),
     topP: Number(process.env.MODEL_TOP_P ?? 1),
     maxTokens: Number(process.env.MODEL_MAX_TOKENS ?? 1024),
-    enableStreaming
+    enableStreaming,
+    enableSessionSummary,
+    sessionSummaryTriggerMessages,
+    sessionSummaryKeepRecent
   });
 
   await telemetry.captureSessionMeta({
@@ -158,6 +164,9 @@ async function main() {
     output.write(`model_io_debug=on file=${modelIoFilePath}\n`);
   }
   output.write(`streaming=${enableStreaming ? "on" : "off"}\n`);
+  output.write(
+    `session_summary=${enableSessionSummary ? "on" : "off"} trigger=${sessionSummaryTriggerMessages} keep_recent=${sessionSummaryKeepRecent}\n`
+  );
   output.write("Use /help for workflow commands (/fix, /test, /explain, /commit).\n");
 
   while (true) {

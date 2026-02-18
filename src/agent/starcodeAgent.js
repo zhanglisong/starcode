@@ -110,6 +110,36 @@ function pushToolMessage(messages, toolCallId, payload) {
   });
 }
 
+function truncateText(value, max = 220) {
+  const normalized = normalizeContent(value).replace(/\s+/g, " ").trim();
+  if (normalized.length <= max) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, max - 1))}…`;
+}
+
+function isSessionSummaryMessage(message) {
+  return message?.role === "system" && String(message?.content ?? "").startsWith("Session memory summary:");
+}
+
+function summarizeOlderMessages(messages) {
+  const lines = [];
+  for (const message of messages) {
+    if (!message || isSessionSummaryMessage(message)) {
+      continue;
+    }
+    if (!["user", "assistant", "tool"].includes(message.role)) {
+      continue;
+    }
+    const text = truncateText(message.content, 180);
+    if (!text) {
+      continue;
+    }
+    lines.push(`- ${message.role}: ${text}`);
+  }
+  return lines.join("\n");
+}
+
 export class StarcodeAgent {
   constructor({
     provider,
@@ -123,7 +153,10 @@ export class StarcodeAgent {
     topP = 1,
     maxTokens = 1024,
     maxToolRounds = 5,
-    enableStreaming = false
+    enableStreaming = false,
+    enableSessionSummary = false,
+    sessionSummaryTriggerMessages = 18,
+    sessionSummaryKeepRecent = 8
   }) {
     this.provider = provider;
     this.telemetry = telemetry;
@@ -136,6 +169,10 @@ export class StarcodeAgent {
     this.maxTokens = maxTokens;
     this.maxToolRounds = maxToolRounds;
     this.enableStreaming = enableStreaming;
+    this.enableSessionSummary = enableSessionSummary;
+    this.sessionSummaryTriggerMessages = sessionSummaryTriggerMessages;
+    this.sessionSummaryKeepRecent = sessionSummaryKeepRecent;
+    this.sessionSummary = "";
     this.messages = [{ role: "system", content: systemPrompt }];
   }
 
@@ -144,6 +181,59 @@ export class StarcodeAgent {
       return;
     }
     await this.modelIoLogger.log(event);
+  }
+
+  compactSessionMemory() {
+    if (!this.enableSessionSummary) {
+      return null;
+    }
+
+    const systemPrompt = this.messages[0];
+    const history = this.messages.slice(1).filter((message) => !isSessionSummaryMessage(message));
+    const trigger = Math.max(1, Number(this.sessionSummaryTriggerMessages) || 18);
+    const keepRecent = Math.max(1, Number(this.sessionSummaryKeepRecent) || 8);
+
+    if (history.length <= trigger) {
+      return null;
+    }
+
+    const splitIndex = Math.max(0, history.length - keepRecent);
+    const older = history.slice(0, splitIndex);
+    const recent = history.slice(splitIndex);
+    const olderSummary = summarizeOlderMessages(older);
+
+    if (!olderSummary) {
+      return null;
+    }
+
+    const summaryParts = [];
+    if (this.sessionSummary) {
+      summaryParts.push(this.sessionSummary);
+    }
+    summaryParts.push(olderSummary);
+
+    const mergedSummary = summaryParts.join("\n");
+    const summaryLines = mergedSummary
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const boundedSummary = summaryLines.slice(Math.max(0, summaryLines.length - 60)).join("\n");
+
+    this.sessionSummary = boundedSummary;
+    this.messages = [
+      systemPrompt,
+      {
+        role: "system",
+        content: `Session memory summary:\n${this.sessionSummary}`
+      },
+      ...recent
+    ];
+
+    return {
+      history_messages: history.length,
+      compressed_messages: older.length,
+      summary_lines: boundedSummary ? boundedSummary.split("\n").length : 0
+    };
   }
 
   async runTurn(userText, options = {}) {
@@ -204,6 +294,7 @@ export class StarcodeAgent {
     let latestUsage = {};
     let latestFinishReason = "unknown";
     let finalAssistantText = "";
+    let summaryUpdate = null;
     const executedById = new Map();
     const timing = {
       modelMs: 0,
@@ -474,6 +565,14 @@ export class StarcodeAgent {
       }
 
       persistTurnMessages();
+      summaryUpdate = this.compactSessionMemory();
+      if (summaryUpdate) {
+        await this.logModelIo({
+          phase: "session_summary_update",
+          trace_id: traceId,
+          ...summaryUpdate
+        });
+      }
 
       const latencyMs = Date.now() - startedAt;
       const latencyBreakdown = createLatencyBreakdown({
@@ -517,6 +616,7 @@ export class StarcodeAgent {
         toolDecisions: allToolCalls,
         toolResults: allToolResults,
         reasoningSummary: "Behavior data captured from runtime instrumentation.",
+        sessionSummary: summaryUpdate,
         usage: latestUsage,
         latencyMs,
         latencyBreakdown
@@ -530,7 +630,8 @@ export class StarcodeAgent {
         output_text: finalAssistantText,
         latency_ms: latencyMs,
         usage: latestUsage,
-        latency_breakdown: latencyBreakdown
+        latency_breakdown: latencyBreakdown,
+        session_summary: summaryUpdate
       });
 
       return {
@@ -539,10 +640,19 @@ export class StarcodeAgent {
         usage: latestUsage,
         latencyMs,
         latencyBreakdown,
+        sessionSummary: summaryUpdate,
         flush
       };
     } catch (error) {
       persistTurnMessages();
+      summaryUpdate = this.compactSessionMemory();
+      if (summaryUpdate) {
+        await this.logModelIo({
+          phase: "session_summary_update",
+          trace_id: traceId,
+          ...summaryUpdate
+        });
+      }
 
       const latencyMs = Date.now() - startedAt;
       const latencyBreakdown = createLatencyBreakdown({

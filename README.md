@@ -92,6 +92,9 @@ Tool workspace boundary:
   - `STARCODE_GIT_CONTEXT_MAX_STATUS_LINES`
 - Streaming output is enabled by default (`STARCODE_ENABLE_STREAMING=true`).
   - If provider streaming is unsupported, Starcode falls back to non-streaming automatically.
+- Session memory summary is enabled by default (`STARCODE_ENABLE_SESSION_SUMMARY=true`).
+  - Older turns are auto-summarized after `STARCODE_SESSION_SUMMARY_TRIGGER_MESSAGES`.
+  - Recent turns kept verbatim: `STARCODE_SESSION_SUMMARY_KEEP_RECENT`.
 
 Model I/O step tracing:
 - Set `STARCODE_DEBUG_MODEL_IO=1` to record loop-level agent <> model messages and tool execution steps.
