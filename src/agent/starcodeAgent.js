@@ -140,6 +140,44 @@ function summarizeOlderMessages(messages) {
   return lines.join("\n");
 }
 
+function buildExecutionPlan(userText) {
+  const normalized = String(userText ?? "").trim();
+  const splitCandidates = normalized
+    .split(/\bthen\b|[.;]/gi)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  const candidateSteps = splitCandidates.length
+    ? splitCandidates
+    : [
+        `Understand request: ${truncateText(normalized, 120)}`,
+        "Inspect relevant files and current workspace state",
+        "Implement and verify the requested change"
+      ];
+
+  const steps = candidateSteps.slice(0, 5).map((step, index) => ({
+    id: `step_${index + 1}`,
+    text: step,
+    status: "pending"
+  }));
+
+  return {
+    goal: normalized,
+    steps,
+    created_at: new Date().toISOString()
+  };
+}
+
+function planToSystemPrompt(plan) {
+  const steps = (plan?.steps ?? []).map((step, index) => `${index + 1}. ${step.text}`).join("\n");
+  return [
+    "Execution plan (planning mode):",
+    `Goal: ${plan.goal}`,
+    steps ? `Steps:\n${steps}` : "Steps:\n1. Execute the request safely and verify output.",
+    "Follow this plan order, and report completion status for each step in your final response."
+  ].join("\n");
+}
+
 export class StarcodeAgent {
   constructor({
     provider,
@@ -154,6 +192,7 @@ export class StarcodeAgent {
     maxTokens = 1024,
     maxToolRounds = 5,
     enableStreaming = false,
+    enablePlanningMode = false,
     enableSessionSummary = false,
     sessionSummaryTriggerMessages = 18,
     sessionSummaryKeepRecent = 8
@@ -169,6 +208,7 @@ export class StarcodeAgent {
     this.maxTokens = maxTokens;
     this.maxToolRounds = maxToolRounds;
     this.enableStreaming = enableStreaming;
+    this.enablePlanningMode = enablePlanningMode;
     this.enableSessionSummary = enableSessionSummary;
     this.sessionSummaryTriggerMessages = sessionSummaryTriggerMessages;
     this.sessionSummaryKeepRecent = sessionSummaryKeepRecent;
@@ -280,6 +320,24 @@ export class StarcodeAgent {
         trace_id: traceId,
         source: "git",
         skipped: true
+      });
+    }
+
+    const planningRequested = this.enablePlanningMode && options?.planning !== false;
+    let activePlan = null;
+    if (planningRequested) {
+      activePlan = buildExecutionPlan(userText);
+      turnMessages.push({
+        role: "system",
+        content: planToSystemPrompt(activePlan)
+      });
+      if (typeof options?.onPlan === "function") {
+        options.onPlan(activePlan);
+      }
+      await this.logModelIo({
+        phase: "plan_generated",
+        trace_id: traceId,
+        plan: activePlan
       });
     }
 
@@ -574,6 +632,18 @@ export class StarcodeAgent {
         });
       }
 
+      if (activePlan) {
+        activePlan = {
+          ...activePlan,
+          status: "completed",
+          completed_at: new Date().toISOString(),
+          steps: activePlan.steps.map((step) => ({
+            ...step,
+            status: "completed"
+          }))
+        };
+      }
+
       const latencyMs = Date.now() - startedAt;
       const latencyBreakdown = createLatencyBreakdown({
         totalMs: latencyMs,
@@ -596,7 +666,8 @@ export class StarcodeAgent {
         usage: latestUsage,
         latencyMs,
         latencyBreakdown,
-        status: "ok"
+        status: "ok",
+        plan: activePlan
       });
 
       await this.telemetry.captureModelBehavior({
@@ -617,6 +688,7 @@ export class StarcodeAgent {
         toolResults: allToolResults,
         reasoningSummary: "Behavior data captured from runtime instrumentation.",
         sessionSummary: summaryUpdate,
+        plan: activePlan,
         usage: latestUsage,
         latencyMs,
         latencyBreakdown
@@ -631,7 +703,8 @@ export class StarcodeAgent {
         latency_ms: latencyMs,
         usage: latestUsage,
         latency_breakdown: latencyBreakdown,
-        session_summary: summaryUpdate
+        session_summary: summaryUpdate,
+        plan: activePlan
       });
 
       return {
@@ -640,6 +713,7 @@ export class StarcodeAgent {
         usage: latestUsage,
         latencyMs,
         latencyBreakdown,
+        plan: activePlan,
         sessionSummary: summaryUpdate,
         flush
       };
@@ -652,6 +726,18 @@ export class StarcodeAgent {
           trace_id: traceId,
           ...summaryUpdate
         });
+      }
+
+      if (activePlan) {
+        activePlan = {
+          ...activePlan,
+          status: "failed",
+          failed_at: new Date().toISOString(),
+          steps: activePlan.steps.map((step) => ({
+            ...step,
+            status: "incomplete"
+          }))
+        };
       }
 
       const latencyMs = Date.now() - startedAt;
@@ -689,6 +775,7 @@ export class StarcodeAgent {
           name: error.name,
           message: error.message
         },
+        plan: activePlan,
         latencyMs,
         latencyBreakdown
       });

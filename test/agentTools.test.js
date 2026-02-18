@@ -681,3 +681,37 @@ test("agent summarizes older session turns and keeps recent context", async () =
   const summaryEvent = modelIoLogger.state.events.find((event) => event.phase === "session_summary_update");
   assert.equal(Boolean(summaryEvent), true);
 });
+
+test("agent planning mode emits plan and injects it into execution context", async () => {
+  const provider = new ContextProbeProvider();
+  const plans = [];
+
+  const agent = new StarcodeAgent({
+    provider,
+    telemetry: telemetryStub(),
+    localTools: null,
+    model: "stub-model",
+    systemPrompt: "You are a test agent.",
+    enablePlanningMode: true
+  });
+
+  const result = await agent.runTurn("read src/index.js then explain the bug", {
+    planning: true,
+    onPlan: (plan) => plans.push(plan)
+  });
+
+  assert.equal(result.outputText, "Context received.");
+  assert.equal(plans.length, 1);
+  assert.equal(Array.isArray(plans[0].steps), true);
+  assert.equal(plans[0].steps.length >= 2, true);
+  assert.equal(result.plan?.status, "completed");
+  assert.equal(
+    provider.capturedMessages.some(
+      (message) => message.role === "system" && String(message.content).startsWith("Execution plan (planning mode):")
+    ),
+    true
+  );
+
+  const noPlan = await agent.runTurn("just answer", { planning: false });
+  assert.equal(noPlan.plan, null);
+});

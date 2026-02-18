@@ -67,6 +67,20 @@ async function nextLine(rl) {
   }
 }
 
+function renderPlan(plan) {
+  if (!plan || !Array.isArray(plan.steps)) {
+    return "";
+  }
+  const lines = [
+    "plan>",
+    `goal: ${plan.goal}`
+  ];
+  for (let i = 0; i < plan.steps.length; i += 1) {
+    lines.push(`${i + 1}. ${plan.steps[i].text}`);
+  }
+  return lines.join("\n");
+}
+
 async function main() {
   const sessionId = process.env.SESSION_ID ?? randomUUID();
 
@@ -89,6 +103,7 @@ async function main() {
   const model = process.env.MODEL_NAME ?? "gpt-4.1-mini";
   const workspaceDir = process.env.STARCODE_WORKSPACE_DIR ?? process.cwd();
   const enableStreaming = process.env.STARCODE_ENABLE_STREAMING !== "false";
+  const enablePlanningMode = process.env.STARCODE_ENABLE_PLANNING_MODE === "true";
   const enableSessionSummary = process.env.STARCODE_ENABLE_SESSION_SUMMARY !== "false";
   const sessionSummaryTriggerMessages = Number(process.env.STARCODE_SESSION_SUMMARY_TRIGGER_MESSAGES ?? 18);
   const sessionSummaryKeepRecent = Number(process.env.STARCODE_SESSION_SUMMARY_KEEP_RECENT ?? 8);
@@ -139,6 +154,7 @@ async function main() {
     topP: Number(process.env.MODEL_TOP_P ?? 1),
     maxTokens: Number(process.env.MODEL_MAX_TOKENS ?? 1024),
     enableStreaming,
+    enablePlanningMode,
     enableSessionSummary,
     sessionSummaryTriggerMessages,
     sessionSummaryKeepRecent
@@ -164,6 +180,7 @@ async function main() {
     output.write(`model_io_debug=on file=${modelIoFilePath}\n`);
   }
   output.write(`streaming=${enableStreaming ? "on" : "off"}\n`);
+  output.write(`planning_mode=${enablePlanningMode ? "on" : "off"}\n`);
   output.write(
     `session_summary=${enableSessionSummary ? "on" : "off"} trigger=${sessionSummaryTriggerMessages} keep_recent=${sessionSummaryKeepRecent}\n`
   );
@@ -204,6 +221,10 @@ async function main() {
       let streamed = false;
       const turn = await agent.runTurn(turnInput, {
         stream: enableStreaming,
+        planning: enablePlanningMode,
+        onPlan: (plan) => {
+          output.write(`${renderPlan(plan)}\n`);
+        },
         onTextDelta: (chunk) => {
           if (!streamed) {
             output.write("assistant> ");

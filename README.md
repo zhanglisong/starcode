@@ -67,6 +67,11 @@ Slash workflow commands (SC-017):
 - `/commit [message]`: deterministic commit workflow; without a message, Starcode proposes one and stops.
 - `/help`: show available slash commands.
 
+Optional planner mode (SC-008):
+- Enable with `STARCODE_ENABLE_PLANNING_MODE=true`.
+- Starcode emits an actionable step plan before execution for each turn.
+- Disable to skip planning and execute directly.
+
 Tool workspace boundary:
 - Set `STARCODE_WORKSPACE_DIR` to limit read/write/list operations to one root directory.
 - Default is current working directory when launching the CLI.
