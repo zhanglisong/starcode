@@ -34,6 +34,9 @@ const DEFAULT_SHELL_DENY_PATTERNS = [
   /\bdd\b/i
 ];
 
+const DEFAULT_WEB_SEARCH_TIMEOUT_MS = 8_000;
+const DEFAULT_WEB_SEARCH_MAX_RESULTS = 8;
+
 function safeJsonParse(raw) {
   if (typeof raw !== "string") {
     return {};
@@ -97,6 +100,82 @@ function escapeRegExp(value) {
 
 function toPosixPath(value) {
   return String(value).split(path.sep).join("/");
+}
+
+function normalizeDomainList(input) {
+  const values = Array.isArray(input)
+    ? input
+    : typeof input === "string"
+      ? input
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean)
+      : [];
+
+  return values
+    .map((value) => String(value).trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, ""))
+    .filter(Boolean);
+}
+
+function hostMatchesDomains(urlValue, domains) {
+  if (!domains.length) {
+    return true;
+  }
+
+  let host = "";
+  try {
+    host = new URL(String(urlValue)).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+
+  return domains.some((domain) => host === domain || host.endsWith("." + domain));
+}
+
+function flattenDuckDuckGoTopics(items, output) {
+  for (const item of items || []) {
+    if (Array.isArray(item?.Topics)) {
+      flattenDuckDuckGoTopics(item.Topics, output);
+      continue;
+    }
+
+    if (!item?.FirstURL || !item?.Text) {
+      continue;
+    }
+
+    const text = String(item.Text);
+    const [titleCandidate, snippetCandidate] = text.split(" - ");
+    output.push({
+      title: String(titleCandidate || "Untitled").trim(),
+      url: String(item.FirstURL),
+      snippet: String(snippetCandidate || text).trim(),
+      source: "duckduckgo"
+    });
+  }
+}
+
+function normalizeSearchResultItem(item, fallbackSource) {
+  const title = String(item?.title ?? item?.name ?? "Untitled").trim();
+  const url = String(item?.url ?? item?.link ?? "").trim();
+
+  if (!url) {
+    return null;
+  }
+
+  const snippet = String(item?.snippet ?? item?.description ?? item?.text ?? "").trim();
+  const source = String(item?.source ?? fallbackSource ?? "web").trim();
+
+  return { title, url, snippet, source };
+}
+
+function withTimeoutAbort(ms) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+
+  return {
+    signal: controller.signal,
+    clear: () => clearTimeout(timer)
+  };
 }
 
 function compileGlobPattern(pattern) {
@@ -232,7 +311,13 @@ export class LocalFileTools {
     maxShellTimeoutMs = 120_000,
     shellMaxOutputBytes = 32_000,
     shellAllowCommands = DEFAULT_SHELL_ALLOW_COMMANDS,
-    shellDenyPatterns = DEFAULT_SHELL_DENY_PATTERNS
+    shellDenyPatterns = DEFAULT_SHELL_DENY_PATTERNS,
+    enableWebSearchTool = false,
+    webSearchProvider = "duckduckgo",
+    webSearchEndpoint = "",
+    webSearchApiKey = "",
+    webSearchTimeoutMs = DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+    webSearchMaxResults = DEFAULT_WEB_SEARCH_MAX_RESULTS
   } = {}) {
     this.baseDir = path.resolve(baseDir);
     this.maxReadBytes = maxReadBytes;
@@ -253,6 +338,12 @@ export class LocalFileTools {
     this.shellDenyPatterns = (normalizedDenyPatterns.length ? normalizedDenyPatterns : DEFAULT_SHELL_DENY_PATTERNS).map(
       (pattern) => (pattern instanceof RegExp ? pattern : new RegExp(String(pattern), "i"))
     );
+    this.enableWebSearchTool = !!enableWebSearchTool;
+    this.webSearchProvider = String(webSearchProvider || "duckduckgo").toLowerCase();
+    this.webSearchEndpoint = typeof webSearchEndpoint === "string" ? webSearchEndpoint.trim() : "";
+    this.webSearchApiKey = String(webSearchApiKey || "").trim();
+    this.webSearchTimeoutMs = clampNumber(webSearchTimeoutMs, DEFAULT_WEB_SEARCH_TIMEOUT_MS, 200, 60_000);
+    this.webSearchMaxResults = clampNumber(webSearchMaxResults, DEFAULT_WEB_SEARCH_MAX_RESULTS, 1, 20);
   }
 
   getToolDefinitions() {
@@ -485,6 +576,36 @@ export class LocalFileTools {
               recursive: { type: "boolean" }
             },
             required: ["path"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "search_web",
+          description: "Search public web results for a query and return titles, URLs, and snippets.",
+          parameters: {
+            type: "object",
+            properties: {
+              query: {
+                type: "string",
+                description: "Search query text."
+              },
+              count: {
+                type: "number",
+                description: "Maximum number of results to return."
+              },
+              domains: {
+                type: "array",
+                items: { type: "string" },
+                description: "Optional domain allowlist filter."
+              },
+              safe_search: {
+                type: "boolean",
+                description: "Prefer safer search results when supported."
+              }
+            },
+            required: ["query"]
           }
         }
       },
@@ -1078,6 +1199,181 @@ export class LocalFileTools {
     });
   }
 
+  async searchWebViaDuckDuckGo({ query, count, safeSearch }) {
+    const searchUrl = new URL("https://api.duckduckgo.com/");
+    searchUrl.searchParams.set("q", query);
+    searchUrl.searchParams.set("format", "json");
+    searchUrl.searchParams.set("no_redirect", "1");
+    searchUrl.searchParams.set("no_html", "1");
+    searchUrl.searchParams.set("skip_disambig", "1");
+    searchUrl.searchParams.set("kp", safeSearch ? "1" : "-1");
+
+    const timeout = withTimeoutAbort(this.webSearchTimeoutMs);
+    try {
+      const response = await fetch(searchUrl, {
+        method: "GET",
+        signal: timeout.signal,
+        headers: {
+          "user-agent": "starcode/0.1 (web-search-tool)"
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error("duckduckgo response " + response.status);
+      }
+
+      const payload = await response.json();
+      const results = [];
+
+      if (payload?.AbstractURL && payload?.AbstractText) {
+        results.push({
+          title: String(payload.Heading || query),
+          url: String(payload.AbstractURL),
+          snippet: String(payload.AbstractText),
+          source: "duckduckgo"
+        });
+      }
+
+      flattenDuckDuckGoTopics(payload?.RelatedTopics ?? [], results);
+
+      return results.slice(0, Math.max(1, count * 3));
+    } finally {
+      timeout.clear();
+    }
+  }
+
+  async searchWebViaEndpoint({ query, count, domains, safeSearch }) {
+    if (!this.webSearchEndpoint) {
+      throw new Error("web search endpoint is not configured");
+    }
+
+    const timeout = withTimeoutAbort(this.webSearchTimeoutMs);
+    try {
+      const headers = {
+        "content-type": "application/json"
+      };
+
+      if (this.webSearchApiKey) {
+        headers.authorization = "Bearer " + this.webSearchApiKey;
+      }
+
+      const response = await fetch(this.webSearchEndpoint, {
+        method: "POST",
+        signal: timeout.signal,
+        headers,
+        body: JSON.stringify({
+          query,
+          count,
+          domains,
+          safe_search: !!safeSearch
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error("web search endpoint response " + response.status);
+      }
+
+      const payload = await response.json();
+      const rows = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload?.results)
+          ? payload.results
+          : Array.isArray(payload?.data)
+            ? payload.data
+            : [];
+
+      return rows
+        .map((item) => normalizeSearchResultItem(item, this.webSearchProvider === "endpoint" ? "endpoint" : "web"))
+        .filter(Boolean);
+    } finally {
+      timeout.clear();
+    }
+  }
+
+  async searchWeb({ query, count, domains, safe_search = true } = {}) {
+    if (!this.enableWebSearchTool) {
+      return {
+        ok: false,
+        blocked: true,
+        blocked_reason: "web search tool is disabled"
+      };
+    }
+
+    if (!query || typeof query !== "string") {
+      throw new Error("query is required");
+    }
+
+    const requestedCount = Number.isFinite(Number(count)) ? Math.round(Number(count)) : this.webSearchMaxResults;
+    const normalizedCount = Math.max(1, Math.min(this.webSearchMaxResults, requestedCount));
+    const requestedDomains = normalizeDomainList(domains);
+    const startedAt = Date.now();
+
+    try {
+      let rawResults;
+
+      if (this.webSearchProvider === "endpoint" || this.webSearchEndpoint) {
+        rawResults = await this.searchWebViaEndpoint({
+          query,
+          count: normalizedCount,
+          domains: requestedDomains,
+          safeSearch: !!safe_search
+        });
+      } else {
+        rawResults = await this.searchWebViaDuckDuckGo({
+          query,
+          count: normalizedCount,
+          safeSearch: !!safe_search
+        });
+      }
+
+      const unique = [];
+      const seen = new Set();
+
+      for (const row of rawResults) {
+        const normalized = normalizeSearchResultItem(row, this.webSearchProvider);
+        if (!normalized) {
+          continue;
+        }
+
+        if (!hostMatchesDomains(normalized.url, requestedDomains)) {
+          continue;
+        }
+
+        if (seen.has(normalized.url)) {
+          continue;
+        }
+
+        seen.add(normalized.url);
+        unique.push(normalized);
+      }
+
+      const results = unique.slice(0, normalizedCount);
+
+      return {
+        ok: true,
+        query,
+        provider: this.webSearchProvider === "endpoint" || this.webSearchEndpoint ? "endpoint" : "duckduckgo",
+        count: results.length,
+        truncated: unique.length > results.length,
+        requested_count: requestedCount,
+        max_count: this.webSearchMaxResults,
+        domains: requestedDomains,
+        safe_search: !!safe_search,
+        results,
+        duration_ms: Date.now() - startedAt
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        query,
+        provider: this.webSearchProvider === "endpoint" || this.webSearchEndpoint ? "endpoint" : "duckduckgo",
+        error: error.message,
+        results: [],
+        duration_ms: Date.now() - startedAt
+      };
+    }
+  }
+
   async executeToolCall(call) {
     const fn = call?.function;
     const name = fn?.name;
@@ -1108,6 +1404,8 @@ export class LocalFileTools {
         return this.moveFile(args);
       case "delete_file":
         return this.deleteFile(args);
+      case "search_web":
+        return this.searchWeb(args);
       case "execute_shell":
         return this.executeShell(args);
       default:

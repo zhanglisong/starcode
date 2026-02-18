@@ -91,7 +91,13 @@ async function main() {
     maxShellTimeoutMs: Number(process.env.STARCODE_SHELL_MAX_TIMEOUT_MS ?? 120_000),
     shellMaxOutputBytes: Number(process.env.STARCODE_SHELL_MAX_OUTPUT_BYTES ?? 32_000),
     shellAllowCommands: parseCsv(process.env.STARCODE_SHELL_ALLOW_COMMANDS),
-    shellDenyPatterns: parseRegexCsv(process.env.STARCODE_SHELL_DENY_PATTERNS)
+    shellDenyPatterns: parseRegexCsv(process.env.STARCODE_SHELL_DENY_PATTERNS),
+    enableWebSearchTool: process.env.STARCODE_ENABLE_WEB_SEARCH_TOOL === "true",
+    webSearchProvider: process.env.STARCODE_WEB_SEARCH_PROVIDER ?? "duckduckgo",
+    webSearchEndpoint: process.env.STARCODE_WEB_SEARCH_ENDPOINT ?? "",
+    webSearchApiKey: process.env.STARCODE_WEB_SEARCH_API_KEY ?? "",
+    webSearchTimeoutMs: Number(process.env.STARCODE_WEB_SEARCH_TIMEOUT_MS ?? 8000),
+    webSearchMaxResults: Number(process.env.STARCODE_WEB_SEARCH_MAX_RESULTS ?? 8)
   });
   const gitContextProvider = new GitContextProvider({
     baseDir: workspaceDir,

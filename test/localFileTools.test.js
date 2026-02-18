@@ -290,6 +290,65 @@ test("execute_shell rejects cwd outside workspace", async () => {
   }, /outside workspace/);
 });
 
+test("search_web returns normalized endpoint results", async () => {
+  const dir = await makeTempDir();
+  const tools = new LocalFileTools({
+    baseDir: dir,
+    enableWebSearchTool: true,
+    webSearchProvider: "endpoint",
+    webSearchEndpoint: "https://search.internal/v1/query",
+    webSearchApiKey: "secret-key",
+    webSearchMaxResults: 5
+  });
+
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          results: [
+            { title: "A", url: "https://example.com/a", snippet: "sa" },
+            { title: "B", url: "https://docs.example.com/b", snippet: "sb" },
+            { title: "B-dup", url: "https://docs.example.com/b", snippet: "dup" },
+            { title: "C", url: "https://other.com/c", snippet: "sc" }
+          ]
+        };
+      }
+    };
+  };
+
+  try {
+    const result = await tools.searchWeb({
+      query: "starcode",
+      count: 3,
+      domains: ["example.com"]
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.provider, "endpoint");
+    assert.equal(result.count, 2);
+    assert.equal(result.results.every((row) => row.url.includes("example.com")), true);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].options.headers.authorization, /Bearer secret-key/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("search_web returns blocked when tool disabled", async () => {
+  const dir = await makeTempDir();
+  const tools = new LocalFileTools({ baseDir: dir, enableWebSearchTool: false });
+
+  const result = await tools.searchWeb({ query: "hello" });
+  assert.equal(result.ok, false);
+  assert.equal(result.blocked, true);
+});
+
 test("executeToolCall supports new tool names", async () => {
   const dir = await makeTempDir();
   const tools = new LocalFileTools({ baseDir: dir });
@@ -304,6 +363,15 @@ test("executeToolCall supports new tool names", async () => {
   assert.equal(result.ok, true);
   const readResult = await tools.readFile({ path: "x.txt" });
   assert.equal(readResult.content, "x");
+
+  const searchResult = await tools.executeToolCall({
+    function: {
+      name: "search_web",
+      arguments: JSON.stringify({ query: "test" })
+    }
+  });
+
+  assert.equal(typeof searchResult.ok, "boolean");
 
   const shellResult = await tools.executeToolCall({
     function: {
