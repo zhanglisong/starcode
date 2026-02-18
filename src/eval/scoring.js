@@ -17,6 +17,10 @@ async function readFileSafe(filePath) {
   }
 }
 
+function countToolUsage(toolResults, name) {
+  return (Array.isArray(toolResults) ? toolResults : []).filter((item) => item?.name === name).length;
+}
+
 async function evaluateCheck({ check, workspaceDir, assistantText, toolResults }) {
   switch (check.type) {
     case "file_equals": {
@@ -29,6 +33,19 @@ async function evaluateCheck({ check, workspaceDir, assistantText, toolResults }
         detail: passed
           ? `File ${check.path} matched expected content.`
           : `File ${check.path} did not match expected content.`
+      };
+    }
+    case "file_contains": {
+      const absolute = path.resolve(workspaceDir, check.path);
+      const actual = await readFileSafe(absolute);
+      const needle = normalizeText(check.expected);
+      const passed = actual.ok && normalizeText(actual.content).includes(needle);
+      return {
+        type: check.type,
+        passed,
+        detail: passed
+          ? `File ${check.path} contains expected text.`
+          : `File ${check.path} does not contain expected text.`
       };
     }
     case "file_not_exists": {
@@ -63,6 +80,19 @@ async function evaluateCheck({ check, workspaceDir, assistantText, toolResults }
         detail: passed
           ? `Assistant response matched one expected phrase.`
           : `Assistant response matched none of the expected phrases.`
+      };
+    }
+    case "tool_name_used": {
+      const name = String(check.name ?? "").trim();
+      const min = Number(check.min ?? 1);
+      const count = name ? countToolUsage(toolResults, name) : 0;
+      const passed = name.length > 0 && count >= min;
+      return {
+        type: check.type,
+        passed,
+        detail: passed
+          ? `Tool '${name}' used ${count} times (min ${min}).`
+          : `Tool '${name}' used ${count} times (min ${min}).`
       };
     }
     case "min_tool_calls": {

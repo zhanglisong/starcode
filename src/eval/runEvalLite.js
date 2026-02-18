@@ -147,6 +147,35 @@ function summarizeLatencyBreakdown(tasks) {
   };
 }
 
+function summarizeCategories(tasks) {
+  const grouped = new Map();
+
+  for (const task of tasks) {
+    const category = String(task.category ?? "uncategorized");
+    if (!grouped.has(category)) {
+      grouped.set(category, []);
+    }
+    grouped.get(category).push(task);
+  }
+
+  const rows = [];
+  for (const [category, list] of grouped.entries()) {
+    const passed = list.filter((item) => item.passed).length;
+    const total = list.length;
+    const latencies = list.map((item) => item.latency_ms).filter((value) => Number.isFinite(value));
+
+    rows.push({
+      category,
+      total_tasks: total,
+      passed_tasks: passed,
+      pass_rate: total ? Number(((passed / total) * 100).toFixed(1)) : 0,
+      latency: latencyStats(latencies)
+    });
+  }
+
+  return rows.sort((a, b) => a.category.localeCompare(b.category));
+}
+
 function formatMarkdown(report) {
   const lines = [];
   lines.push("# Starcode Eval-Lite Report");
@@ -165,17 +194,158 @@ function formatMarkdown(report) {
     `- Latency Breakdown Share: model=${report.latency_breakdown.model_share_pct}% tool=${report.latency_breakdown.tool_share_pct}% other=${report.latency_breakdown.other_share_pct}%`
   );
   lines.push("");
-  lines.push("| Task ID | Title | Result | Score | Latency ms | Model ms | Tool ms | Other ms | Trace ID |");
-  lines.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+  lines.push("## Category Summary");
+  lines.push("");
+  lines.push("| Category | Pass | Rate | Latency Avg/P95 ms |");
+  lines.push("| --- | --- | --- | --- |");
+  for (const category of report.categories ?? []) {
+    lines.push(
+      `| ${category.category} | ${category.passed_tasks}/${category.total_tasks} | ${category.pass_rate}% | ${category.latency.avg}/${category.latency.p95} |`
+    );
+  }
+  lines.push("");
+  lines.push("## Tasks");
+  lines.push("");
+  lines.push("| Task ID | Category | Title | Result | Score | Latency ms | Model ms | Tool ms | Other ms | Trace ID |");
+  lines.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
 
   for (const task of report.tasks) {
     const breakdown = task.latency_breakdown ?? {};
     lines.push(
-      `| ${task.id} | ${task.title} | ${task.passed ? "PASS" : "FAIL"} | ${task.passed_checks}/${task.max_checks} | ${task.latency_ms ?? "-"} | ${breakdown.model_ms ?? "-"} | ${breakdown.tool_ms ?? "-"} | ${breakdown.other_ms ?? "-"} | ${task.trace_id ?? "-"} |`
+      `| ${task.id} | ${task.category ?? "-"} | ${task.title} | ${task.passed ? "PASS" : "FAIL"} | ${task.passed_checks}/${task.max_checks} | ${task.latency_ms ?? "-"} | ${breakdown.model_ms ?? "-"} | ${breakdown.tool_ms ?? "-"} | ${breakdown.other_ms ?? "-"} | ${task.trace_id ?? "-"} |`
     );
   }
 
   return `${lines.join("\n")}\n`;
+}
+
+async function readJsonlSafe(filePath) {
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    return raw
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .flatMap((line) => {
+        try {
+          return [JSON.parse(line)];
+        } catch {
+          return [];
+        }
+      });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+}
+
+function summarizeNightly(historyRows) {
+  const grouped = new Map();
+
+  for (const row of historyRows) {
+    const provider = String(row.provider ?? "unknown");
+    const model = String(row.model ?? "unknown");
+    const key = `${provider}::${model}`;
+
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        provider,
+        model,
+        runs: 0,
+        pass_rates: [],
+        latency_avgs: [],
+        latency_p95s: [],
+        latest_at: row.finished_at ?? row.started_at ?? null,
+        latest_pass_rate: Number(row.pass_rate ?? 0),
+        latest_latency_avg: Number(row.latency_avg ?? 0),
+        latest_latency_p95: Number(row.latency_p95 ?? 0)
+      });
+    }
+
+    const entry = grouped.get(key);
+    entry.runs += 1;
+    entry.pass_rates.push(Number(row.pass_rate ?? 0));
+    entry.latency_avgs.push(Number(row.latency_avg ?? 0));
+    entry.latency_p95s.push(Number(row.latency_p95 ?? 0));
+
+    const rowDate = Date.parse(row.finished_at ?? row.started_at ?? "");
+    const latestDate = Date.parse(entry.latest_at ?? "");
+    if (!Number.isFinite(latestDate) || (Number.isFinite(rowDate) && rowDate > latestDate)) {
+      entry.latest_at = row.finished_at ?? row.started_at ?? entry.latest_at;
+      entry.latest_pass_rate = Number(row.pass_rate ?? 0);
+      entry.latest_latency_avg = Number(row.latency_avg ?? 0);
+      entry.latest_latency_p95 = Number(row.latency_p95 ?? 0);
+    }
+  }
+
+  return [...grouped.values()]
+    .map((entry) => {
+      const avg = (values) => (values.length ? Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(1)) : 0);
+      return {
+        provider: entry.provider,
+        model: entry.model,
+        runs: entry.runs,
+        latest_at: entry.latest_at,
+        latest_pass_rate: entry.latest_pass_rate,
+        latest_latency_avg: entry.latest_latency_avg,
+        latest_latency_p95: entry.latest_latency_p95,
+        avg_pass_rate: avg(entry.pass_rates),
+        avg_latency_avg: avg(entry.latency_avgs),
+        avg_latency_p95: avg(entry.latency_p95s),
+        best_pass_rate: entry.pass_rates.length ? Number(Math.max(...entry.pass_rates).toFixed(1)) : 0
+      };
+    })
+    .sort((a, b) => b.latest_pass_rate - a.latest_pass_rate || a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model));
+}
+
+function formatNightlyMarkdown(rows) {
+  const lines = [];
+  lines.push("# Starcode Eval Nightly Summary");
+  lines.push("");
+  lines.push("| Provider | Model | Runs | Latest Pass % | Latest Latency Avg/P95 ms | Avg Pass % | Avg Latency Avg/P95 ms | Best Pass % | Latest Run |");
+  lines.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+
+  for (const row of rows) {
+    lines.push(
+      `| ${row.provider} | ${row.model} | ${row.runs} | ${row.latest_pass_rate}% | ${row.latest_latency_avg}/${row.latest_latency_p95} | ${row.avg_pass_rate}% | ${row.avg_latency_avg}/${row.avg_latency_p95} | ${row.best_pass_rate}% | ${row.latest_at ?? "-"} |`
+    );
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
+async function updateNightlyHistory({ rootDir, report }) {
+  const historyDir = path.join(rootDir, "history");
+  await fs.mkdir(historyDir, { recursive: true });
+
+  const historyFile = path.join(historyDir, "nightly.jsonl");
+  const summaryFile = path.join(historyDir, "nightly-summary.md");
+
+  const entry = {
+    run_id: report.run_id,
+    started_at: report.started_at,
+    finished_at: report.finished_at,
+    provider: report.provider,
+    model: report.model,
+    total_tasks: report.total_tasks,
+    passed_tasks: report.passed_tasks,
+    pass_rate: report.pass_rate,
+    latency_avg: report.latency?.avg ?? 0,
+    latency_p95: report.latency?.p95 ?? 0
+  };
+
+  await fs.appendFile(historyFile, `${JSON.stringify(entry)}\n`, "utf8");
+
+  const rows = await readJsonlSafe(historyFile);
+  const summaryRows = summarizeNightly(rows);
+  await fs.writeFile(summaryFile, formatNightlyMarkdown(summaryRows), "utf8");
+
+  return {
+    history_file: historyFile,
+    summary_file: summaryFile
+  };
 }
 
 async function main() {
@@ -186,10 +356,19 @@ async function main() {
   const reportDir = path.join(rootDir, "reports");
   await fs.mkdir(reportDir, { recursive: true });
 
+  const includeCategories = new Set(parseCsv(process.env.STARCODE_EVAL_CATEGORIES).map((value) => value.toLowerCase()));
+  const selectedTasks = includeCategories.size
+    ? evalLiteTasks.filter((task) => includeCategories.has(String(task.category ?? "").toLowerCase()))
+    : evalLiteTasks;
+
+  if (!selectedTasks.length) {
+    throw new Error("No eval tasks selected. Check STARCODE_EVAL_CATEGORIES filter.");
+  }
+
   const startedAt = new Date().toISOString();
   const results = [];
 
-  for (const task of evalLiteTasks) {
+  for (const task of selectedTasks) {
     const taskWorkspace = path.join(rootDir, "workspaces", task.id);
     await resetDir(taskWorkspace);
     await writeSetupFiles(taskWorkspace, task.setupFiles);
@@ -249,6 +428,7 @@ async function main() {
 
       results.push({
         id: task.id,
+        category: task.category ?? "uncategorized",
         title: task.title,
         prompt: task.prompt,
         trace_id: turn.traceId,
@@ -267,6 +447,7 @@ async function main() {
     } catch (error) {
       results.push({
         id: task.id,
+        category: task.category ?? "uncategorized",
         title: task.title,
         prompt: task.prompt,
         trace_id: null,
@@ -293,6 +474,7 @@ async function main() {
   const totalTasks = results.length;
   const passRate = totalTasks ? Number(((passedTasks / totalTasks) * 100).toFixed(1)) : 0;
   const latencies = results.map((item) => item.latency_ms).filter((value) => Number.isFinite(value));
+  const categorySummary = summarizeCategories(results);
 
   const report = {
     run_id: runId,
@@ -306,6 +488,7 @@ async function main() {
     pass_rate: passRate,
     latency: latencyStats(latencies),
     latency_breakdown: summarizeLatencyBreakdown(results),
+    categories: categorySummary,
     tasks: results
   };
 
@@ -314,6 +497,9 @@ async function main() {
 
   await fs.writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   await fs.writeFile(mdPath, formatMarkdown(report), "utf8");
+
+  const historyEnabled = process.env.STARCODE_EVAL_WRITE_HISTORY !== "false";
+  const history = historyEnabled ? await updateNightlyHistory({ rootDir, report }) : null;
 
   process.stdout.write(`Eval-lite complete.\n`);
   process.stdout.write(`Provider=${report.provider} model=${report.model}\n`);
@@ -324,6 +510,10 @@ async function main() {
   );
   process.stdout.write(`JSON report: ${jsonPath}\n`);
   process.stdout.write(`Markdown report: ${mdPath}\n`);
+  if (history) {
+    process.stdout.write(`Nightly history: ${history.history_file}\n`);
+    process.stdout.write(`Nightly summary: ${history.summary_file}\n`);
+  }
 }
 
 main().catch((error) => {

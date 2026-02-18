@@ -48,3 +48,31 @@ test("scoreTask fails when file is missing", async () => {
   assert.equal(result.passedChecks, 0);
   assert.equal(result.maxChecks, 1);
 });
+
+test("scoreTask supports file_contains and tool_name_used checks", async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "starcode-eval-score-"));
+  await fs.mkdir(path.join(workspace, "src"), { recursive: true });
+  await fs.writeFile(path.join(workspace, "src", "math.js"), "export const v = 42;\n", "utf8");
+
+  const task = {
+    checks: [
+      { type: "file_contains", path: "src/math.js", expected: "42" },
+      { type: "tool_name_used", name: "execute_shell", min: 2 }
+    ]
+  };
+
+  const result = await scoreTask({
+    task,
+    workspaceDir: workspace,
+    assistantText: "done",
+    toolResults: [
+      { name: "execute_shell", ok: true },
+      { name: "execute_shell", ok: true },
+      { name: "write_file", ok: true }
+    ]
+  });
+
+  assert.equal(result.passed, true);
+  assert.equal(result.passedChecks, 2);
+  assert.equal(result.maxChecks, 2);
+});

@@ -152,11 +152,15 @@ npm run eval:lite
 Outputs:
 - JSON report: `tmp/eval-lite/reports/<run-id>.json`
 - Markdown summary: `tmp/eval-lite/reports/<run-id>.md`
+- Nightly history: `tmp/eval-lite/history/nightly.jsonl`
+- Nightly summary: `tmp/eval-lite/history/nightly-summary.md`
 
 Current eval-lite scope:
-- 12 objective tasks based on file operations and tool-use behavior.
-- Scoring checks: file content/state, response keywords, minimum tool-call count.
+- 14 objective tasks across categories: `coding`, `edit`, `bugfix`, `shell`.
+- Scoring checks: file state/content, response keywords, tool usage, and minimum tool-call count.
 - Latency breakdown summary: model time vs tool time vs other overhead.
+- Optional category filter: `STARCODE_EVAL_CATEGORIES=coding,bugfix`
+- Optional history toggle: `STARCODE_EVAL_WRITE_HISTORY=false`
 
 ## Provider Profiles (SC-001)
 
