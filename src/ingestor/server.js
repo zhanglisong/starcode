@@ -12,6 +12,13 @@ const API_KEYS = new Set(
     .map((v) => v.trim())
     .filter(Boolean)
 );
+const OPT_IN_ORGS = new Set(
+  (process.env.INGEST_OPT_IN_ORGS ?? "")
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean)
+);
+const RETENTION_DAYS = Number(process.env.INGEST_RETENTION_DAYS ?? 0);
 
 const storage = new IngestStorage(STORAGE_DIR);
 
@@ -47,6 +54,21 @@ function authorized(req) {
   return typeof key === "string" && API_KEYS.has(key);
 }
 
+function isOrgOptedIn(orgId) {
+  if (OPT_IN_ORGS.size === 0) {
+    return true;
+  }
+  return OPT_IN_ORGS.has(String(orgId ?? ""));
+}
+
+function requestActor(req) {
+  const actorHeader = req.headers["x-engineer-id"];
+  if (typeof actorHeader === "string" && actorHeader.trim()) {
+    return actorHeader.trim();
+  }
+  return "admin";
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     if (!req.url || !req.method) {
@@ -60,6 +82,10 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         total_events: total,
         metadata: summary,
+        governance: {
+          opt_in_orgs: [...OPT_IN_ORGS.values()],
+          retention_days: Number.isFinite(RETENTION_DAYS) && RETENTION_DAYS > 0 ? RETENTION_DAYS : null
+        },
         time: new Date().toISOString()
       });
     }
@@ -87,11 +113,80 @@ const server = http.createServer(async (req, res) => {
         return json(res, 400, { error: "no valid events" });
       }
 
-      const result = await storage.writeEvents(valid);
+      const optedIn = valid.filter((event) => isOrgOptedIn(event.org_id));
+      const rejectedOptOut = valid.length - optedIn.length;
+
+      if (!optedIn.length) {
+        return json(res, 202, {
+          accepted: 0,
+          deduplicated: 0,
+          rejected_invalid: events.length - valid.length,
+          rejected_opt_out: rejectedOptOut,
+          rejected: events.length
+        });
+      }
+
+      const result = await storage.writeEvents(optedIn);
       return json(res, 202, {
         accepted: result.accepted,
         deduplicated: result.deduplicated,
-        rejected: events.length - valid.length
+        rejected_invalid: events.length - valid.length,
+        rejected_opt_out: rejectedOptOut,
+        rejected: events.length - optedIn.length
+      });
+    }
+
+    if (req.method === "POST" && req.url === "/v1/admin/delete") {
+      if (!authorized(req)) {
+        return json(res, 401, { error: "unauthorized" });
+      }
+
+      const raw = await readBody(req);
+      let parsed;
+      try {
+        parsed = JSON.parse(raw || "{}");
+      } catch {
+        return json(res, 400, { error: "invalid json" });
+      }
+
+      const result = await storage.deleteEvents({
+        orgId: parsed.org_id,
+        engineerId: parsed.engineer_id,
+        traceId: parsed.trace_id,
+        actor: requestActor(req)
+      });
+
+      return json(res, 200, {
+        ok: true,
+        ...result
+      });
+    }
+
+    if (req.method === "POST" && req.url === "/v1/admin/retention/apply") {
+      if (!authorized(req)) {
+        return json(res, 401, { error: "unauthorized" });
+      }
+
+      const raw = await readBody(req);
+      let parsed;
+      try {
+        parsed = JSON.parse(raw || "{}");
+      } catch {
+        return json(res, 400, { error: "invalid json" });
+      }
+
+      const days = Number.isFinite(Number(parsed.days)) ? Number(parsed.days) : RETENTION_DAYS;
+      if (!Number.isFinite(days) || days <= 0) {
+        return json(res, 400, { error: "positive retention days required" });
+      }
+
+      const result = await storage.applyRetention(days, {
+        actor: requestActor(req)
+      });
+
+      return json(res, 200, {
+        ok: true,
+        ...result
       });
     }
 
@@ -103,7 +198,19 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, HOST, async () => {
   await storage.init();
+
+  if (Number.isFinite(RETENTION_DAYS) && RETENTION_DAYS > 0) {
+    try {
+      const result = await storage.applyRetention(RETENTION_DAYS, { actor: "startup" });
+      process.stdout.write(`Retention applied on startup: deleted=${result.deleted_events}\n`);
+    } catch (error) {
+      process.stdout.write(`Retention startup apply failed: ${error.message}\n`);
+    }
+  }
+
   process.stdout.write(
-    `Starcode ingestor listening on http://${HOST}:${PORT} (storage=${STORAGE_DIR})\n`
+    `Starcode ingestor listening on http://${HOST}:${PORT} (storage=${STORAGE_DIR}) opt_in_orgs=${
+      OPT_IN_ORGS.size ? [...OPT_IN_ORGS.values()].join(",") : "ALL"
+    } retention_days=${Number.isFinite(RETENTION_DAYS) && RETENTION_DAYS > 0 ? RETENTION_DAYS : "off"}\n`
   );
 });

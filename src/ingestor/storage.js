@@ -40,12 +40,39 @@ function parseJsonLines(text) {
     .filter(Boolean);
 }
 
+function withinRetention(occurredAt, retentionDays) {
+  const ts = Date.parse(occurredAt);
+  if (!Number.isFinite(ts)) {
+    return true;
+  }
+
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  return ts >= cutoff;
+}
+
+function matchesDeleteFilter(event, { orgId, engineerId, traceId }) {
+  if (orgId && event.org_id !== orgId) {
+    return false;
+  }
+  if (engineerId && event.engineer_id !== engineerId) {
+    return false;
+  }
+  if (traceId && event.trace_id !== traceId) {
+    return false;
+  }
+
+  return true;
+}
+
 export class IngestStorage {
-  constructor(baseDir) {
+  constructor(baseDir, { enableAudit = true } = {}) {
     this.baseDir = baseDir;
     this.seen = new Set();
     this.seenLimit = 200000;
     this.seenIndexFile = path.join(this.baseDir, ".seen_event_ids.jsonl");
+    this.auditDir = path.join(this.baseDir, "_audit");
+    this.auditFile = path.join(this.auditDir, "audit.jsonl");
+    this.enableAudit = !!enableAudit;
     this.initialized = false;
   }
 
@@ -95,8 +122,58 @@ export class IngestStorage {
     await fs.appendFile(this.seenIndexFile, `${lines.join("\n")}\n`, "utf8");
   }
 
-  isDataFile(fileName) {
-    return fileName.endsWith(".jsonl") && fileName !== path.basename(this.seenIndexFile);
+  async rewriteSeenIndex() {
+    const lines = [...this.seen.values()].filter(Boolean);
+    await fs.writeFile(this.seenIndexFile, lines.length ? `${lines.join("\n")}\n` : "", "utf8");
+  }
+
+  isDataFile(fullPath, fileName) {
+    if (!fileName.endsWith(".jsonl")) {
+      return false;
+    }
+
+    return fullPath !== this.seenIndexFile && fullPath !== this.auditFile;
+  }
+
+  async listEventFiles() {
+    await this.init();
+    const output = [];
+
+    const walk = async (dir) => {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          await walk(full);
+          continue;
+        }
+
+        if (!entry.isFile() || !this.isDataFile(full, entry.name)) {
+          continue;
+        }
+
+        output.push(full);
+      }
+    };
+
+    await walk(this.baseDir);
+    return output;
+  }
+
+  async writeAuditEntry({ action, actor = "system", details = {} }) {
+    if (!this.enableAudit) {
+      return;
+    }
+
+    await fs.mkdir(this.auditDir, { recursive: true });
+    const row = {
+      occurred_at: new Date().toISOString(),
+      action,
+      actor,
+      details
+    };
+
+    await fs.appendFile(this.auditFile, `${JSON.stringify(row)}\n`, "utf8");
   }
 
   async writeEvents(events) {
@@ -136,37 +213,146 @@ export class IngestStorage {
 
     await this.appendSeenIndex(acceptedIds);
 
-    return {
+    const result = {
       accepted: acceptedIds.length,
       deduplicated: events.length - acceptedIds.length
     };
+
+    await this.writeAuditEntry({
+      action: "events.write",
+      details: result
+    });
+
+    return result;
+  }
+
+  async deleteEvents({ orgId, engineerId, traceId, actor = "admin" } = {}) {
+    if (!orgId && !engineerId && !traceId) {
+      throw new Error("at least one filter is required: orgId, engineerId, or traceId");
+    }
+
+    const files = await this.listEventFiles();
+    let deletedEvents = 0;
+    let filesTouched = 0;
+    const deletedIds = [];
+
+    for (const file of files) {
+      const rows = parseJsonLines(await fs.readFile(file, "utf8"));
+      const keep = [];
+      let touched = false;
+
+      for (const row of rows) {
+        if (matchesDeleteFilter(row, { orgId, engineerId, traceId })) {
+          touched = true;
+          deletedEvents += 1;
+          if (row.event_id) {
+            deletedIds.push(row.event_id);
+          }
+        } else {
+          keep.push(row);
+        }
+      }
+
+      if (!touched) {
+        continue;
+      }
+
+      filesTouched += 1;
+      await fs.writeFile(file, keep.length ? `${keep.map((row) => JSON.stringify(row)).join("\n")}\n` : "", "utf8");
+    }
+
+    for (const id of deletedIds) {
+      this.seen.delete(id);
+    }
+    await this.rewriteSeenIndex();
+
+    const result = {
+      deleted_events: deletedEvents,
+      files_touched: filesTouched
+    };
+
+    await this.writeAuditEntry({
+      action: "events.delete",
+      actor,
+      details: {
+        filter: {
+          org_id: orgId ?? null,
+          engineer_id: engineerId ?? null,
+          trace_id: traceId ?? null
+        },
+        ...result
+      }
+    });
+
+    return result;
+  }
+
+  async applyRetention(retentionDays, { actor = "system" } = {}) {
+    const days = Number(retentionDays);
+    if (!Number.isFinite(days) || days <= 0) {
+      throw new Error("retentionDays must be a positive number");
+    }
+
+    const files = await this.listEventFiles();
+    let deletedEvents = 0;
+    let filesTouched = 0;
+    const deletedIds = [];
+
+    for (const file of files) {
+      const rows = parseJsonLines(await fs.readFile(file, "utf8"));
+      const keep = [];
+      let touched = false;
+
+      for (const row of rows) {
+        if (withinRetention(row.occurred_at, days)) {
+          keep.push(row);
+          continue;
+        }
+
+        touched = true;
+        deletedEvents += 1;
+        if (row.event_id) {
+          deletedIds.push(row.event_id);
+        }
+      }
+
+      if (!touched) {
+        continue;
+      }
+
+      filesTouched += 1;
+      await fs.writeFile(file, keep.length ? `${keep.map((row) => JSON.stringify(row)).join("\n")}\n` : "", "utf8");
+    }
+
+    for (const id of deletedIds) {
+      this.seen.delete(id);
+    }
+    await this.rewriteSeenIndex();
+
+    const result = {
+      deleted_events: deletedEvents,
+      files_touched: filesTouched,
+      retention_days: days
+    };
+
+    await this.writeAuditEntry({
+      action: "events.retention",
+      actor,
+      details: result
+    });
+
+    return result;
   }
 
   async walkEventLines(onLine) {
-    await this.init();
+    const files = await this.listEventFiles();
 
-    const walk = async (dir) => {
-      const entries = await fs.readdir(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          await walk(full);
-          continue;
-        }
-
-        if (!entry.isFile() || !this.isDataFile(entry.name)) {
-          continue;
-        }
-
-        const raw = await fs.readFile(full, "utf8");
-        const rows = parseJsonLines(raw);
-        for (const row of rows) {
-          await onLine(row);
-        }
+    for (const file of files) {
+      const rows = parseJsonLines(await fs.readFile(file, "utf8"));
+      for (const row of rows) {
+        await onLine(row);
       }
-    };
-
-    await walk(this.baseDir);
+    }
   }
 
   async countAllEvents() {

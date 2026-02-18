@@ -34,6 +34,7 @@ It supports company-wide aggregation across many engineers and exports post-trai
 - Stores events in JSONL partitioned by org/date/event type.
 - Idempotent ingest via persisted `event_id` index (duplicate event posts are deduplicated).
 - `GET /health` exposes total event count plus org/team/engineer aggregation summary.
+- Governance APIs: `POST /v1/admin/delete` (delete by `org_id`/`engineer_id`/`trace_id`) and `POST /v1/admin/retention/apply`.
 
 4. Training Export (`/Users/huizhang/code/starcode/src/training/exportDataset.js`)
 - Builds SFT rows from conversation events.
@@ -108,6 +109,7 @@ Outputs:
 - Telemetry redaction is enabled by default (`TELEMETRY_REDACT=true`).
 - Retry/backoff settings are configurable via `TELEMETRY_RETRY_BASE_MS`, `TELEMETRY_RETRY_MAX_MS`, `TELEMETRY_RETRY_MULTIPLIER`.
 - API-key enforcement is configurable in ingestor (`INGEST_API_KEYS`).
+- Org opt-in and retention are configurable via `INGEST_OPT_IN_ORGS` and `INGEST_RETENTION_DAYS`.
 - Data is stored in JSONL for auditability and deterministic exports.
 - Training export redaction is enabled by default (`TRAINING_REDACT=true`) with per-run coverage report.
 - Add your own legal/compliance policy gates before using export data for post-training.

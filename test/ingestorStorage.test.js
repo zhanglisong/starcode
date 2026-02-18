@@ -116,3 +116,56 @@ test("writeEvents stores redacted payload content", async () => {
   assert.equal(raw.includes("[REDACTED_EMAIL]"), true);
   assert.equal(raw.includes("[REDACTED_API_KEY]"), true);
 });
+
+test("deleteEvents removes rows by engineer and writes audit log", async () => {
+  const dir = await makeTempDir();
+  const storage = new IngestStorage(dir);
+
+  await storage.writeEvents([
+    makeEvent({ eventId: "evt-del-1", engineer: "alice" }),
+    makeEvent({ eventId: "evt-del-2", engineer: "bob" }),
+    makeEvent({ eventId: "evt-del-3", engineer: "alice" })
+  ]);
+
+  const result = await storage.deleteEvents({
+    orgId: "acme",
+    engineerId: "alice",
+    actor: "security-admin"
+  });
+
+  assert.deepEqual(result, {
+    deleted_events: 2,
+    files_touched: 1
+  });
+
+  const total = await storage.countAllEvents();
+  assert.equal(total, 1);
+
+  const auditRaw = await fs.readFile(path.join(dir, "_audit", "audit.jsonl"), "utf8");
+  assert.match(auditRaw, /events.delete/);
+  assert.match(auditRaw, /security-admin/);
+});
+
+test("applyRetention removes out-of-policy rows", async () => {
+  const dir = await makeTempDir();
+  const storage = new IngestStorage(dir);
+
+  const oldDate = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString();
+  const freshDate = new Date().toISOString();
+
+  await storage.writeEvents([
+    makeEvent({ eventId: "evt-ret-1", occurredAt: oldDate }),
+    makeEvent({ eventId: "evt-ret-2", occurredAt: freshDate })
+  ]);
+
+  const result = await storage.applyRetention(30, { actor: "retention-job" });
+  assert.equal(result.deleted_events, 1);
+  assert.equal(result.retention_days, 30);
+
+  const total = await storage.countAllEvents();
+  assert.equal(total, 1);
+
+  const auditRaw = await fs.readFile(path.join(dir, "_audit", "audit.jsonl"), "utf8");
+  assert.match(auditRaw, /events.retention/);
+  assert.match(auditRaw, /retention-job/);
+});
