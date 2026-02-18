@@ -199,6 +199,27 @@ Current eval-lite scope:
 - Optional category filter: `STARCODE_EVAL_CATEGORIES=coding,bugfix`
 - Optional history toggle: `STARCODE_EVAL_WRITE_HISTORY=false`
 
+## Real-Model Regression Suite
+
+Run expanded real-model regressions (beyond eval-lite) against current provider/model:
+
+```bash
+npm run eval:real-model
+```
+
+Optional filters:
+- `STARCODE_REAL_EVAL_CATEGORIES=streaming,planning,memory`
+- `STARCODE_REAL_EVAL_DIR=tmp/real-model-regression`
+
+Coverage focus includes:
+- streaming behavior, planning mode, session summary compaction
+- prompt/tool contract version tagging
+- recovery behavior, safety boundaries, and advanced file/shell flows
+
+Outputs:
+- JSON report: `tmp/real-model-regression/reports/<run-id>.json`
+- Markdown report: `tmp/real-model-regression/reports/<run-id>.md`
+
 ## Provider Profiles (SC-001)
 
 `MODEL_PROVIDER` controls default endpoint/auth behavior and compatibility constraints:
