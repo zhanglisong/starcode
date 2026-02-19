@@ -200,3 +200,146 @@ test("mcp add/list/disable/enable/remove flow persists MCP server config", async
   });
   assert.match(removeOut.read(), /mcp remove ok id=demo/);
 });
+
+test("mcp add supports stdio transport and runtime mapping", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "starcode-mcp-stdio-cmds-"));
+  const storePath = path.join(root, "profiles.json");
+
+  const addOut = outputBuffer();
+  await runProviderUtilityCommand({
+    argv: [
+      "mcp",
+      "add",
+      "local-demo",
+      "--type",
+      "stdio",
+      "--command",
+      "node",
+      "--args",
+      "[\"server.js\",\"--mode\",\"test\"]",
+      "--env",
+      "A=1,B=2"
+    ],
+    output: addOut.writer,
+    env: {},
+    storePath
+  });
+
+  assert.match(addOut.read(), /mcp add ok id=local-demo/);
+  assert.match(addOut.read(), /command=node/);
+
+  const runtime = await resolveRuntimeMcpConfig({
+    env: {},
+    storePath
+  });
+  assert.equal(runtime.servers.length, 1);
+  assert.equal(runtime.servers[0].type, "stdio");
+  assert.equal(runtime.servers[0].command, "node");
+  assert.deepEqual(runtime.servers[0].args, ["server.js", "--mode", "test"]);
+  assert.equal(runtime.servers[0].environment.A, "1");
+});
+
+test("mcp auth start/finish/status/clear lifecycle", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "starcode-mcp-auth-cmds-"));
+  const storePath = path.join(root, "profiles.json");
+
+  await runProviderUtilityCommand({
+    argv: [
+      "mcp",
+      "add",
+      "secure",
+      "--type",
+      "remote",
+      "--endpoint",
+      "https://mcp.example"
+    ],
+    output: outputBuffer().writer,
+    env: {},
+    storePath
+  });
+
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    if (String(url).endsWith("/oauth/start")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            authorization_url: "https://auth.example/authorize",
+            state: "state-123"
+          };
+        },
+        async text() {
+          return "";
+        }
+      };
+    }
+    if (String(url).endsWith("/oauth/token")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            access_token: "tok-abc",
+            refresh_token: "ref-xyz",
+            expires_in: 3600
+          };
+        },
+        async text() {
+          return "";
+        }
+      };
+    }
+    throw new Error(`unexpected URL ${url}`);
+  };
+
+  const startOut = outputBuffer();
+  await runProviderUtilityCommand({
+    argv: ["mcp", "auth", "start", "secure"],
+    output: startOut.writer,
+    env: {},
+    storePath,
+    fetchImpl
+  });
+  assert.match(startOut.read(), /mcp auth start ok id=secure/);
+  assert.match(startOut.read(), /authorization_url=https:\/\/auth.example\/authorize/);
+
+  const finishOut = outputBuffer();
+  await runProviderUtilityCommand({
+    argv: ["mcp", "auth", "finish", "secure", "--code", "code-1"],
+    output: finishOut.writer,
+    env: {},
+    storePath,
+    fetchImpl
+  });
+  assert.match(finishOut.read(), /mcp auth finish ok id=secure/);
+  assert.match(finishOut.read(), /has_access_token=true/);
+
+  const statusOut = outputBuffer();
+  await runProviderUtilityCommand({
+    argv: ["mcp", "auth", "status", "secure"],
+    output: statusOut.writer,
+    env: {},
+    storePath
+  });
+  assert.match(statusOut.read(), /status=authenticated/);
+
+  const runtime = await resolveRuntimeMcpConfig({
+    env: {},
+    storePath
+  });
+  assert.equal(runtime.servers[0].oauth.access_token, "tok-abc");
+
+  const clearOut = outputBuffer();
+  await runProviderUtilityCommand({
+    argv: ["mcp", "auth", "clear", "secure"],
+    output: clearOut.writer,
+    env: {},
+    storePath
+  });
+  assert.match(clearOut.read(), /mcp auth clear ok id=secure/);
+
+  assert.equal(calls.length, 2);
+});

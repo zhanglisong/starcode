@@ -225,6 +225,7 @@ export class StarcodeAgent {
     modelIoLogger,
     gitContextProvider,
     mcpManager,
+    permissionManager,
     localTools,
     model,
     systemPrompt,
@@ -245,6 +246,7 @@ export class StarcodeAgent {
     this.modelIoLogger = modelIoLogger;
     this.gitContextProvider = gitContextProvider;
     this.mcpManager = mcpManager;
+    this.permissionManager = permissionManager;
     this.localTools = localTools;
     this.model = model;
     this.promptVersion = promptVersion;
@@ -260,6 +262,24 @@ export class StarcodeAgent {
     this.sessionSummaryKeepRecent = sessionSummaryKeepRecent;
     this.sessionSummary = "";
     this.messages = [{ role: "system", content: systemPrompt }];
+  }
+
+  exportSessionState() {
+    return {
+      messages: this.messages.map((message) => ({ ...message })),
+      sessionSummary: this.sessionSummary
+    };
+  }
+
+  hydrateSessionState({ messages, sessionSummary } = {}) {
+    const list = Array.isArray(messages) ? messages.filter((item) => item && typeof item === "object") : [];
+    if (list.length > 0) {
+      this.messages = list.map((message) => ({ ...message }));
+    }
+
+    if (typeof sessionSummary === "string") {
+      this.sessionSummary = sessionSummary;
+    }
   }
 
   async logModelIo(event) {
@@ -633,6 +653,94 @@ export class StarcodeAgent {
             continue;
           }
 
+          let permissionDecision = null;
+          if (this.permissionManager) {
+            permissionDecision = await this.permissionManager.authorizeToolCall(call, {
+              traceId,
+              round,
+              toolCallId
+            });
+
+            await this.logModelIo({
+              phase: "permission_decision",
+              trace_id: traceId,
+              round,
+              tool_call_id: toolCallId,
+              tool_name: toolName,
+              allowed: permissionDecision.allowed,
+              decision: permissionDecision.decision,
+              mode: permissionDecision.mode,
+              source: permissionDecision.source,
+              permission: permissionDecision.request?.permission ?? null,
+              patterns: permissionDecision.request?.patterns ?? [],
+              reason: permissionDecision.reason ?? null,
+              denied_rule: permissionDecision.denied_rule ?? null,
+              prompt_decision: permissionDecision.prompt_decision ?? null
+            });
+          }
+
+          if (permissionDecision && !permissionDecision.allowed) {
+            const toolDurationMs = Date.now() - toolStartedAt;
+            timing.toolMs += toolDurationMs;
+            timing.toolCalls += 1;
+            timing.toolFailures += 1;
+
+            const toolPayload = {
+              ok: false,
+              denied: true,
+              error: "permission denied",
+              permission: {
+                decision: permissionDecision.decision,
+                source: permissionDecision.source,
+                mode: permissionDecision.mode,
+                reason: permissionDecision.reason ?? null,
+                request: permissionDecision.request,
+                denied_rule: permissionDecision.denied_rule ?? null,
+                prompt_decision: permissionDecision.prompt_decision ?? null
+              }
+            };
+
+            const payload = {
+              ok: false,
+              result: null,
+              error: "permission denied",
+              tool_payload: toolPayload,
+              tool_call_id: toolCallId,
+              meta: null
+            };
+
+            allToolResults.push({
+              tool_call_id: toolCallId,
+              name: toolName,
+              arguments: parsedArguments,
+              ok: false,
+              denied: true,
+              error: "permission denied",
+              duration_ms: toolDurationMs,
+              permission: toolPayload.permission
+            });
+
+            await this.logModelIo({
+              phase: "tool_result",
+              trace_id: traceId,
+              round,
+              tool_call_id: toolCallId,
+              name: toolName,
+              ok: false,
+              denied: true,
+              error: "permission denied",
+              duration_ms: toolDurationMs,
+              permission: toolPayload.permission
+            });
+
+            if (call?.id) {
+              executedById.set(call.id, payload);
+            }
+            executedByShapeInRound.set(shapeKey, payload);
+            pushToolMessage(turnMessages, toolCallId, toolPayload);
+            continue;
+          }
+
           try {
             let toolResult;
             let toolMeta = null;
@@ -672,6 +780,15 @@ export class StarcodeAgent {
               ok: true,
               result: toolResult,
               duration_ms: toolDurationMs,
+              permission: permissionDecision
+                ? {
+                    decision: permissionDecision.decision,
+                    source: permissionDecision.source,
+                    mode: permissionDecision.mode,
+                    reason: permissionDecision.reason ?? null,
+                    prompt_decision: permissionDecision.prompt_decision ?? null
+                  }
+                : null,
               ...(toolMeta ?? {})
             });
 
@@ -684,6 +801,15 @@ export class StarcodeAgent {
               ok: true,
               result: toolResult,
               duration_ms: toolDurationMs,
+              permission: permissionDecision
+                ? {
+                    decision: permissionDecision.decision,
+                    source: permissionDecision.source,
+                    mode: permissionDecision.mode,
+                    reason: permissionDecision.reason ?? null,
+                    prompt_decision: permissionDecision.prompt_decision ?? null
+                  }
+                : null,
               ...(toolMeta ?? {})
             });
 
@@ -725,6 +851,15 @@ export class StarcodeAgent {
               ok: false,
               error: error.message,
               duration_ms: toolDurationMs,
+              permission: permissionDecision
+                ? {
+                    decision: permissionDecision.decision,
+                    source: permissionDecision.source,
+                    mode: permissionDecision.mode,
+                    reason: permissionDecision.reason ?? null,
+                    prompt_decision: permissionDecision.prompt_decision ?? null
+                  }
+                : null,
               ...(payload.meta ?? {})
             });
 
@@ -737,6 +872,15 @@ export class StarcodeAgent {
               ok: false,
               error: error.message,
               duration_ms: toolDurationMs,
+              permission: permissionDecision
+                ? {
+                    decision: permissionDecision.decision,
+                    source: permissionDecision.source,
+                    mode: permissionDecision.mode,
+                    reason: permissionDecision.reason ?? null,
+                    prompt_decision: permissionDecision.prompt_decision ?? null
+                  }
+                : null,
               ...(payload.meta ?? {})
             });
 
@@ -849,10 +993,13 @@ export class StarcodeAgent {
 
       return {
         traceId,
+        status: "ok",
         outputText: finalAssistantText,
         usage: latestUsage,
         latencyMs,
         latencyBreakdown,
+        toolCalls: allToolCalls,
+        toolResults: allToolResults,
         plan: activePlan,
         contractVersions: {
           prompt: this.promptVersion,

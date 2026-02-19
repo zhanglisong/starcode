@@ -7,14 +7,14 @@ function parseArgs(args) {
   const flags = {};
 
   for (let i = 0; i < args.length; i += 1) {
-    const token = args[i];
+    const token = String(args[i] ?? "");
     if (!token.startsWith("--")) {
       positionals.push(token);
       continue;
     }
 
     const key = token.slice(2);
-    const next = args[i + 1];
+    const next = String(args[i + 1] ?? "");
     if (next && !next.startsWith("--")) {
       flags[key] = next;
       i += 1;
@@ -54,6 +54,53 @@ function parseHeaderPairs(value) {
   return headers;
 }
 
+function parseEnvPairs(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return {};
+  }
+
+  const env = {};
+  for (const token of value.split(",")) {
+    const pair = token.trim();
+    if (!pair) {
+      continue;
+    }
+    const idx = pair.indexOf("=");
+    if (idx <= 0) {
+      continue;
+    }
+    const key = pair.slice(0, idx).trim();
+    const itemValue = pair.slice(idx + 1).trim();
+    if (!key) {
+      continue;
+    }
+    env[key] = itemValue;
+  }
+  return env;
+}
+
+function parseCommandArgs(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item));
+  }
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return [];
+  }
+  if (text.startsWith("[") && text.endsWith("]")) {
+    try {
+      const parsed = JSON.parse(text);
+      return Array.isArray(parsed) ? parsed.map((item) => String(item)) : [];
+    } catch {
+      return [];
+    }
+  }
+  return text
+    .split(/\s+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function resolveProvider(value) {
   return normalizeProviderName(String(value ?? "").toLowerCase() || "openai-compatible");
 }
@@ -83,6 +130,41 @@ function parseProviderFromArgs(positionals, fallback = "") {
   return resolveProvider(positionals[0] ?? fallback ?? "");
 }
 
+function normalizeMcpType(value) {
+  const type = String(value ?? "http").trim().toLowerCase();
+  if (["http", "sse", "stdio", "remote"].includes(type)) {
+    return type;
+  }
+  return "http";
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function toEpochMs(value) {
+  if (value === null || value === undefined || value === "") {
+    return 0;
+  }
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) {
+    if (numeric > 1e12) {
+      return Math.round(numeric);
+    }
+    return Math.round(numeric * 1000);
+  }
+  const timestamp = Date.parse(String(value));
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function isExpiredAuth(auth) {
+  const expiresAt = toEpochMs(auth?.expires_at);
+  if (!expiresAt) {
+    return false;
+  }
+  return Date.now() >= expiresAt;
+}
+
 export async function resolveRuntimeModelConfig({ env = process.env, storePath = "" } = {}) {
   const { data } = await loadProfiles(storePath);
   const provider = resolveProvider(env.MODEL_PROVIDER ?? data.defaults.provider ?? "mock");
@@ -101,18 +183,35 @@ export async function resolveRuntimeModelConfig({ env = process.env, storePath =
 
 export async function resolveRuntimeMcpConfig({ env = process.env, storePath = "" } = {}) {
   const { data } = await loadProfiles(storePath);
+  const authMap = data?.mcp?.auth && typeof data.mcp.auth === "object" ? data.mcp.auth : {};
+
   const servers = Object.entries(data?.mcp?.servers ?? {})
-    .map(([id, server]) => ({
-      id,
-      enabled: server?.enabled !== false,
-      type: String(server?.type ?? "http"),
-      endpoint: String(server?.endpoint ?? ""),
-      version: String(server?.version ?? "v1"),
-      api_key: String(server?.api_key ?? ""),
-      api_key_env: String(server?.api_key_env ?? ""),
-      headers: server?.headers && typeof server.headers === "object" ? server.headers : {}
-    }))
-    .filter((server) => server.enabled);
+    .map(([id, server]) => {
+      const auth = authMap[id] && typeof authMap[id] === "object" ? authMap[id] : {};
+      return {
+        id,
+        enabled: server?.enabled !== false,
+        type: normalizeMcpType(server?.type),
+        endpoint: String(server?.endpoint ?? ""),
+        command: String(server?.command ?? ""),
+        args: Array.isArray(server?.args) ? server.args.map((item) => String(item)) : [],
+        environment: server?.environment && typeof server.environment === "object" ? server.environment : {},
+        version: String(server?.version ?? "v1"),
+        api_key: String(server?.api_key ?? ""),
+        api_key_env: String(server?.api_key_env ?? ""),
+        headers: server?.headers && typeof server.headers === "object" ? server.headers : {},
+        oauth: auth
+      };
+    })
+    .filter((server) => {
+      if (!server.enabled) {
+        return false;
+      }
+      if (server.type === "stdio") {
+        return Boolean(server.command);
+      }
+      return Boolean(server.endpoint);
+    });
 
   if (env.STARCODE_MCP_DISABLE === "true") {
     return { servers: [] };
@@ -163,7 +262,7 @@ async function handleAuthLogout(args, { output, storePath }) {
     data.defaults.provider = "";
     data.defaults.model = "";
     await saveProfiles(data, resolvedPath);
-    print(output, `auth logout ok provider=all`);
+    print(output, "auth logout ok provider=all");
     print(output, `profile_path=${resolvedPath}`);
     return;
   }
@@ -299,9 +398,13 @@ async function handleMcpList({ output, storePath }) {
   }
 
   for (const [id, server] of servers) {
+    const type = normalizeMcpType(server?.type);
+    const endpoint = String(server?.endpoint ?? "");
+    const command = String(server?.command ?? "");
+    const location = type === "stdio" ? `command=${command}` : `endpoint=${endpoint}`;
     print(
       output,
-      `- ${id} enabled=${server?.enabled !== false} type=${server?.type ?? "http"} endpoint=${server?.endpoint ?? ""} version=${server?.version ?? "v1"}`
+      `- ${id} enabled=${server?.enabled !== false} type=${type} ${location} version=${server?.version ?? "v1"}`
     );
   }
 }
@@ -313,24 +416,43 @@ async function handleMcpAdd(args, { output, storePath }) {
     throw new Error("Missing MCP server id. Usage: starcode mcp add <id> --endpoint <url>");
   }
 
-  const endpoint = String(flags.endpoint ?? "").trim();
-  if (!endpoint) {
+  const { path: resolvedPath, data } = await loadProfiles(storePath);
+  const previous = data?.mcp?.servers?.[id] ?? {};
+  const type = normalizeMcpType(flags.type ?? previous.type ?? "http");
+
+  let endpoint = String(flags.endpoint ?? previous.endpoint ?? "").trim();
+  const command = String(flags.command ?? previous.command ?? "").trim();
+  const argsList = flags.args !== undefined ? parseCommandArgs(flags.args) : Array.isArray(previous.args) ? previous.args : [];
+  const environment = {
+    ...(previous.environment && typeof previous.environment === "object" ? previous.environment : {}),
+    ...parseEnvPairs(String(flags.env ?? ""))
+  };
+
+  if (type === "stdio") {
+    if (!command) {
+      throw new Error("Missing --command for stdio MCP server.");
+    }
+    endpoint = "";
+  } else if (!endpoint) {
     throw new Error("Missing --endpoint for MCP server.");
   }
 
-  const { path: resolvedPath, data } = await loadProfiles(storePath);
-  const previous = data?.mcp?.servers?.[id] ?? {};
   const headers = {
     ...(previous.headers && typeof previous.headers === "object" ? previous.headers : {}),
     ...parseHeaderPairs(String(flags.header ?? ""))
   };
 
-  data.mcp = data.mcp && typeof data.mcp === "object" ? data.mcp : { servers: {} };
+  data.mcp = data.mcp && typeof data.mcp === "object" ? data.mcp : { servers: {}, auth: {} };
   data.mcp.servers = data.mcp.servers && typeof data.mcp.servers === "object" ? data.mcp.servers : {};
+  data.mcp.auth = data.mcp.auth && typeof data.mcp.auth === "object" ? data.mcp.auth : {};
+
   data.mcp.servers[id] = {
     id,
-    type: String(flags.type ?? previous.type ?? "http"),
+    type,
     endpoint,
+    command,
+    args: argsList,
+    environment,
     enabled: flags.disabled ? false : true,
     version: String(flags.version ?? previous.version ?? "v1"),
     api_key: String(flags["api-key"] ?? previous.api_key ?? ""),
@@ -341,7 +463,11 @@ async function handleMcpAdd(args, { output, storePath }) {
   await saveProfiles(data, resolvedPath);
 
   print(output, `mcp add ok id=${id}`);
-  print(output, `endpoint=${endpoint}`);
+  if (type === "stdio") {
+    print(output, `command=${command}`);
+  } else {
+    print(output, `endpoint=${endpoint}`);
+  }
   print(output, `enabled=${data.mcp.servers[id].enabled}`);
   print(output, `profile_path=${resolvedPath}`);
 }
@@ -359,6 +485,9 @@ async function handleMcpRemove(args, { output, storePath }) {
   }
 
   delete data.mcp.servers[id];
+  if (data?.mcp?.auth?.[id]) {
+    delete data.mcp.auth[id];
+  }
   await saveProfiles(data, resolvedPath);
   print(output, `mcp remove ok id=${id}`);
   print(output, `profile_path=${resolvedPath}`);
@@ -380,6 +509,206 @@ async function handleMcpToggle(args, { output, storePath }, enabled) {
   await saveProfiles(data, resolvedPath);
   print(output, `mcp ${enabled ? "enable" : "disable"} ok id=${id}`);
   print(output, `profile_path=${resolvedPath}`);
+}
+
+async function handleMcpAuthStatus(args, { output, storePath }) {
+  const { positionals } = parseArgs(args);
+  const id = String(positionals[0] ?? "").trim();
+  if (!id) {
+    throw new Error("Missing MCP server id. Usage: starcode mcp auth status <id>");
+  }
+
+  const { data } = await loadProfiles(storePath);
+  const auth = data?.mcp?.auth?.[id] ?? null;
+  const status = !auth
+    ? "not_authenticated"
+    : isExpiredAuth(auth)
+      ? "expired"
+      : auth.access_token
+        ? "authenticated"
+        : "not_authenticated";
+
+  print(output, `mcp auth status id=${id} status=${status}`);
+  print(output, `has_access_token=${Boolean(auth?.access_token)}`);
+  print(output, `expires_at=${auth?.expires_at ?? ""}`);
+}
+
+async function handleMcpAuthClear(args, { output, storePath }) {
+  const { positionals } = parseArgs(args);
+  const id = String(positionals[0] ?? "").trim();
+  if (!id) {
+    throw new Error("Missing MCP server id. Usage: starcode mcp auth clear <id>");
+  }
+
+  const { path: resolvedPath, data } = await loadProfiles(storePath);
+  data.mcp = data.mcp && typeof data.mcp === "object" ? data.mcp : { servers: {}, auth: {} };
+  data.mcp.auth = data.mcp.auth && typeof data.mcp.auth === "object" ? data.mcp.auth : {};
+  delete data.mcp.auth[id];
+  await saveProfiles(data, resolvedPath);
+
+  print(output, `mcp auth clear ok id=${id}`);
+  print(output, `profile_path=${resolvedPath}`);
+}
+
+async function handleMcpAuthStart(args, { output, storePath, fetchImpl }) {
+  const { positionals } = parseArgs(args);
+  const id = String(positionals[0] ?? "").trim();
+  if (!id) {
+    throw new Error("Missing MCP server id. Usage: starcode mcp auth start <id>");
+  }
+
+  const { path: resolvedPath, data } = await loadProfiles(storePath);
+  const server = data?.mcp?.servers?.[id];
+  if (!server) {
+    throw new Error(`MCP server '${id}' not found.`);
+  }
+
+  const endpoint = String(server.endpoint ?? "").trim();
+  if (!endpoint) {
+    throw new Error(`MCP server '${id}' has no endpoint for auth flow.`);
+  }
+
+  const response = await fetchImpl(`${endpoint.replace(/\/+$/, "")}/oauth/start`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({ server_id: id })
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`mcp auth start failed: ${response.status} ${detail}`);
+  }
+
+  const payload = await response.json();
+  const authorizationUrl = String(payload?.authorization_url ?? payload?.url ?? "").trim();
+  const state = String(payload?.state ?? "").trim();
+
+  if (!authorizationUrl) {
+    throw new Error("mcp auth start failed: missing authorization_url");
+  }
+
+  data.mcp = data.mcp && typeof data.mcp === "object" ? data.mcp : { servers: {}, auth: {} };
+  data.mcp.auth = data.mcp.auth && typeof data.mcp.auth === "object" ? data.mcp.auth : {};
+  const previous = data.mcp.auth[id] && typeof data.mcp.auth[id] === "object" ? data.mcp.auth[id] : {};
+  data.mcp.auth[id] = {
+    ...previous,
+    authorization_url: authorizationUrl,
+    pending_state: state,
+    updated_at: nowIso()
+  };
+
+  await saveProfiles(data, resolvedPath);
+
+  print(output, `mcp auth start ok id=${id}`);
+  print(output, `authorization_url=${authorizationUrl}`);
+  if (state) {
+    print(output, `state=${state}`);
+  }
+  print(output, `profile_path=${resolvedPath}`);
+}
+
+async function handleMcpAuthFinish(args, { output, storePath, fetchImpl }) {
+  const { positionals, flags } = parseArgs(args);
+  const id = String(positionals[0] ?? "").trim();
+  if (!id) {
+    throw new Error("Missing MCP server id. Usage: starcode mcp auth finish <id> --code <code>");
+  }
+
+  const code = String(flags.code ?? "").trim();
+  if (!code) {
+    throw new Error("Missing --code for MCP auth finish.");
+  }
+
+  const { path: resolvedPath, data } = await loadProfiles(storePath);
+  const server = data?.mcp?.servers?.[id];
+  if (!server) {
+    throw new Error(`MCP server '${id}' not found.`);
+  }
+
+  const endpoint = String(server.endpoint ?? "").trim();
+  if (!endpoint) {
+    throw new Error(`MCP server '${id}' has no endpoint for auth flow.`);
+  }
+
+  data.mcp = data.mcp && typeof data.mcp === "object" ? data.mcp : { servers: {}, auth: {} };
+  data.mcp.auth = data.mcp.auth && typeof data.mcp.auth === "object" ? data.mcp.auth : {};
+  const previous = data.mcp.auth[id] && typeof data.mcp.auth[id] === "object" ? data.mcp.auth[id] : {};
+  const state = String(flags.state ?? previous.pending_state ?? "").trim();
+
+  const response = await fetchImpl(`${endpoint.replace(/\/+$/, "")}/oauth/token`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      code,
+      state
+    })
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`mcp auth finish failed: ${response.status} ${detail}`);
+  }
+
+  const payload = await response.json();
+  const accessToken = String(payload?.access_token ?? payload?.token ?? "").trim();
+  const refreshToken = String(payload?.refresh_token ?? "").trim();
+  const tokenType = String(payload?.token_type ?? "Bearer").trim();
+  const expiresIn = Number(payload?.expires_in ?? 0);
+  const expiresAtRaw = payload?.expires_at;
+  const expiresAt = expiresAtRaw
+    ? new Date(toEpochMs(expiresAtRaw)).toISOString()
+    : Number.isFinite(expiresIn) && expiresIn > 0
+      ? new Date(Date.now() + expiresIn * 1000).toISOString()
+      : "";
+
+  if (!accessToken) {
+    throw new Error("mcp auth finish failed: missing access_token");
+  }
+
+  data.mcp.auth[id] = {
+    ...previous,
+    access_token: accessToken,
+    refresh_token: refreshToken,
+    token_type: tokenType,
+    expires_at: expiresAt,
+    pending_state: "",
+    updated_at: nowIso()
+  };
+
+  await saveProfiles(data, resolvedPath);
+
+  print(output, `mcp auth finish ok id=${id}`);
+  print(output, `has_access_token=${Boolean(accessToken)}`);
+  print(output, `expires_at=${expiresAt}`);
+  print(output, `profile_path=${resolvedPath}`);
+}
+
+async function runMcpAuthCommand(args, options) {
+  const [subcommand = "status", ...rest] = args;
+  const normalized = String(subcommand).toLowerCase();
+
+  if (normalized === "status") {
+    await handleMcpAuthStatus(rest, options);
+    return;
+  }
+  if (normalized === "start") {
+    await handleMcpAuthStart(rest, options);
+    return;
+  }
+  if (normalized === "finish") {
+    await handleMcpAuthFinish(rest, options);
+    return;
+  }
+  if (normalized === "clear") {
+    await handleMcpAuthClear(rest, options);
+    return;
+  }
+
+  throw new Error(`Unknown mcp auth subcommand '${subcommand}'. Use: status | start | finish | clear`);
 }
 
 export async function runMcpCommand(args, options) {
@@ -406,8 +735,12 @@ export async function runMcpCommand(args, options) {
     await handleMcpToggle(rest, options, false);
     return;
   }
+  if (normalized === "auth") {
+    await runMcpAuthCommand(rest, options);
+    return;
+  }
 
-  throw new Error(`Unknown mcp subcommand '${subcommand}'. Use: list | add | remove | enable | disable`);
+  throw new Error(`Unknown mcp subcommand '${subcommand}'. Use: list | add | remove | enable | disable | auth`);
 }
 
 export async function runProviderUtilityCommand({

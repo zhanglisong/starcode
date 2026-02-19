@@ -15,7 +15,11 @@ function emptyProfile() {
       model: ""
     },
     mcp: {
-      servers: {}
+      servers: {},
+      auth: {}
+    },
+    permission: {
+      rules: []
     }
   };
 }
@@ -52,9 +56,16 @@ export async function loadProfiles(storePathInput = "") {
         mcp:
           parsed?.mcp && typeof parsed.mcp === "object"
             ? {
-                servers: parsed.mcp?.servers && typeof parsed.mcp.servers === "object" ? parsed.mcp.servers : {}
+                servers: parsed.mcp?.servers && typeof parsed.mcp.servers === "object" ? parsed.mcp.servers : {},
+                auth: parsed.mcp?.auth && typeof parsed.mcp.auth === "object" ? parsed.mcp.auth : {}
               }
-            : { servers: {} }
+            : { servers: {}, auth: {} },
+        permission:
+          parsed?.permission && typeof parsed.permission === "object"
+            ? {
+                rules: Array.isArray(parsed.permission?.rules) ? parsed.permission.rules : []
+              }
+            : { rules: [] }
       }
     };
   } catch (error) {

@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { applyUpdateChunksToLines, parseApplyPatchText } from "./patchParser.js";
 
 const DEFAULT_SHELL_ALLOW_COMMANDS = [
   "cat",
@@ -551,6 +552,32 @@ export class LocalFileTools {
       {
         type: "function",
         function: {
+          name: "apply_patch",
+          description:
+            "Apply a strict multi-file patch envelope with *** Begin Patch / *** End Patch grammar (add/update/delete/move).",
+          parameters: {
+            type: "object",
+            properties: {
+              patch: {
+                type: "string",
+                description: "Patch text following the apply_patch grammar."
+              },
+              patch_text: {
+                type: "string",
+                description: "Alias for patch text."
+              },
+              patchText: {
+                type: "string",
+                description: "Alias for patch text."
+              }
+            },
+            required: []
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
           name: "move_file",
           description: "Move or rename a file within workspace.",
           parameters: {
@@ -1004,6 +1031,148 @@ export class LocalFileTools {
     };
   }
 
+  async applyPatch({ patch: patchInput, patch_text, patchText } = {}) {
+    const patch = String(patchInput ?? patch_text ?? patchText ?? "");
+    if (!patch.trim()) {
+      throw new Error("patch is required");
+    }
+
+    const parsed = parseApplyPatchText(patch);
+    const prepared = [];
+    const occupiedTargets = new Set();
+
+    for (const operation of parsed.operations) {
+      if (operation.type === "add") {
+        const targetPath = this.resolveWithinBase(operation.path);
+        const targetKey = targetPath;
+        if (occupiedTargets.has(targetKey)) {
+          throw new Error(`Duplicate target in patch: ${operation.path}`);
+        }
+        occupiedTargets.add(targetKey);
+
+        let exists = false;
+        try {
+          const stat = await fs.stat(targetPath);
+          exists = stat.isFile() || stat.isDirectory();
+        } catch (error) {
+          if (error?.code !== "ENOENT") {
+            throw error;
+          }
+        }
+        if (exists) {
+          throw new Error(`apply_patch verification failed: file already exists: ${operation.path}`);
+        }
+
+        const additions = operation.content ? operation.content.split("\n").length : 0;
+        prepared.push({
+          type: "add",
+          sourcePath: targetPath,
+          targetPath,
+          relativeSource: path.relative(this.baseDir, targetPath),
+          relativeTarget: path.relative(this.baseDir, targetPath),
+          beforeContent: "",
+          afterContent: operation.content,
+          additions,
+          deletions: 0
+        });
+        continue;
+      }
+
+      if (operation.type === "delete") {
+        const sourcePath = this.resolveWithinBase(operation.path);
+        const stat = await fs.stat(sourcePath);
+        if (!stat.isFile()) {
+          throw new Error(`apply_patch verification failed: not a file: ${operation.path}`);
+        }
+        const beforeContent = await fs.readFile(sourcePath, "utf8");
+        const { lines } = toLines(beforeContent);
+        prepared.push({
+          type: "delete",
+          sourcePath,
+          targetPath: sourcePath,
+          relativeSource: path.relative(this.baseDir, sourcePath),
+          relativeTarget: path.relative(this.baseDir, sourcePath),
+          beforeContent,
+          afterContent: "",
+          additions: 0,
+          deletions: lines.length
+        });
+        continue;
+      }
+
+      const sourcePath = this.resolveWithinBase(operation.path);
+      const sourceStat = await fs.stat(sourcePath);
+      if (!sourceStat.isFile()) {
+        throw new Error(`apply_patch verification failed: not a file: ${operation.path}`);
+      }
+      const beforeContent = await fs.readFile(sourcePath, "utf8");
+      const { lines: sourceLines, trailingNewline } = toLines(beforeContent);
+      const updated = applyUpdateChunksToLines(sourceLines, operation.chunks);
+      const afterContent = fromLines(updated.lines, trailingNewline);
+
+      const targetPath = operation.move_to ? this.resolveWithinBase(operation.move_to) : sourcePath;
+      const targetKey = targetPath;
+      if (occupiedTargets.has(targetKey)) {
+        throw new Error(`Duplicate target in patch: ${operation.move_to || operation.path}`);
+      }
+      occupiedTargets.add(targetKey);
+
+      if (operation.move_to) {
+        try {
+          const targetStat = await fs.stat(targetPath);
+          if (targetStat) {
+            throw new Error(`apply_patch verification failed: move destination exists: ${operation.move_to}`);
+          }
+        } catch (error) {
+          if (error?.code !== "ENOENT") {
+            throw error;
+          }
+        }
+      }
+
+      prepared.push({
+        type: operation.move_to ? "move" : "update",
+        sourcePath,
+        targetPath,
+        relativeSource: path.relative(this.baseDir, sourcePath),
+        relativeTarget: path.relative(this.baseDir, targetPath),
+        beforeContent,
+        afterContent,
+        additions: updated.additions,
+        deletions: updated.deletions
+      });
+    }
+
+    for (const change of prepared) {
+      if (change.type === "delete") {
+        await fs.rm(change.sourcePath);
+        continue;
+      }
+
+      await fs.mkdir(path.dirname(change.targetPath), { recursive: true });
+      await fs.writeFile(change.targetPath, change.afterContent, "utf8");
+      if (change.type === "move" && change.sourcePath !== change.targetPath) {
+        await fs.rm(change.sourcePath);
+      }
+    }
+
+    const files = prepared.map((change) => ({
+      type: change.type,
+      path: change.relativeSource,
+      target_path: change.relativeTarget,
+      additions: change.additions,
+      deletions: change.deletions
+    }));
+
+    return {
+      ok: true,
+      operations_applied: prepared.length,
+      files,
+      total_additions: files.reduce((sum, file) => sum + Number(file.additions || 0), 0),
+      total_deletions: files.reduce((sum, file) => sum + Number(file.deletions || 0), 0)
+    };
+  }
+
   async moveFile({ from, to, overwrite = false } = {}) {
     if (!from || typeof from !== "string") {
       throw new Error("from is required");
@@ -1400,6 +1569,8 @@ export class LocalFileTools {
         return this.insertInFile(args);
       case "patch_file":
         return this.patchFile(args);
+      case "apply_patch":
+        return this.applyPatch(args);
       case "move_file":
         return this.moveFile(args);
       case "delete_file":

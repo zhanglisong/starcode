@@ -178,3 +178,84 @@ test("mcp tool name helpers round-trip", () => {
   });
   assert.equal(parseMcpToolName("write_file"), null);
 });
+
+test("mcp manager supports stdio servers", async () => {
+  const script = [
+    "let body='';",
+    "process.stdin.setEncoding('utf8');",
+    "process.stdin.on('data', chunk => body += chunk);",
+    "process.stdin.on('end', () => {",
+    "  const request = JSON.parse(body.trim());",
+    "  if (request.method === 'discover') {",
+    "    process.stdout.write(JSON.stringify({ result: { version: 'stdio-v1', tools: [{ name: 'echo', description: 'Echo', input_schema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } }], resources: [], prompts: [] } }));",
+    "    return;",
+    "  }",
+    "  if (request.method === 'call_tool') {",
+    "    process.stdout.write(JSON.stringify({ result: { result: { echoed: request.params.arguments.text } } }));",
+    "    return;",
+    "  }",
+    "  process.stdout.write(JSON.stringify({ result: {} }));",
+    "});"
+  ].join("");
+
+  const manager = new McpManager({
+    servers: [
+      {
+        id: "stdio-demo",
+        type: "stdio",
+        command: process.execPath,
+        args: ["-e", script]
+      }
+    ],
+    timeoutMs: 3000
+  });
+
+  const discovery = await manager.discover({ force: true });
+  assert.equal(discovery.servers.length, 1);
+  assert.equal(discovery.servers[0].type, "stdio");
+  assert.equal(discovery.toolDefinitions[0].function.name, "mcp__stdio-demo__echo");
+
+  const execution = await manager.executeToolCall({
+    function: {
+      name: "mcp__stdio-demo__echo",
+      arguments: JSON.stringify({ text: "stdio-ok" })
+    }
+  });
+
+  assert.deepEqual(execution.result, { echoed: "stdio-ok" });
+});
+
+test("mcp manager marks unauthorized servers as needs_auth", async () => {
+  const server = http.createServer((req, res) => {
+    if (req.url === "/tools") {
+      res.statusCode = 401;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ authorization_url: "https://auth.example/start" }));
+      return;
+    }
+    res.statusCode = 404;
+    res.end("not found");
+  });
+
+  const address = await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve(server.address()));
+  });
+
+  try {
+    const endpoint = `http://127.0.0.1:${address.port}`;
+    const manager = new McpManager({
+      servers: [{ id: "secure", type: "remote", endpoint }],
+      timeoutMs: 1000
+    });
+
+    const discovery = await manager.discover({ force: true });
+    assert.equal(discovery.servers.length, 0);
+    assert.equal(discovery.errors.length, 1);
+    assert.equal(discovery.errors[0].status, "needs_auth");
+    assert.equal(discovery.errors[0].authorization_url, "https://auth.example/start");
+    assert.equal(discovery.statuses.secure.status, "needs_auth");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
