@@ -252,6 +252,42 @@ test("provider surfaces non-2xx responses with details", async () => {
   }
 });
 
+test("provider estimates usage when response omits usage payload", async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async () =>
+    okResponse({
+      choices: [
+        {
+          finish_reason: "stop",
+          message: {
+            role: "assistant",
+            content: "hello"
+          }
+        }
+      ]
+    });
+
+  try {
+    const provider = new OpenAICompatibleProvider({
+      apiKey: "sk-test",
+      providerName: "moonshot"
+    });
+
+    const result = await provider.complete({
+      model: "kimi-k2.5",
+      messages: [{ role: "user", content: "say hello" }]
+    });
+
+    assert.equal(result.usage.estimated, true);
+    assert.equal(Number.isFinite(result.usage.prompt_tokens), true);
+    assert.equal(Number.isFinite(result.usage.completion_tokens), true);
+    assert.equal(result.usage.total_tokens > 0, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("openai-compatible parses streaming deltas and tool call fragments", async () => {
   const originalFetch = globalThis.fetch;
   const deltas = [];
@@ -290,6 +326,35 @@ test("openai-compatible parses streaming deltas and tool call fragments", async 
       deltas.filter((delta) => delta.type === "text").map((delta) => delta.text),
       ["Hello ", "world"]
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("streaming provider estimates usage when stream omits usage payload", async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async () =>
+    streamResponse([
+      'data: {"choices":[{"delta":{"content":"tokenless stream"}}]}\n',
+      'data: {"choices":[{"finish_reason":"stop"}]}\n',
+      "data: [DONE]\n"
+    ]);
+
+  try {
+    const provider = new OpenAICompatibleProvider({
+      apiKey: "sk-stream",
+      providerName: "openai-compatible"
+    });
+
+    const result = await provider.complete({
+      model: "gpt-4.1-mini",
+      messages: [{ role: "user", content: "hello there" }],
+      stream: true
+    });
+
+    assert.equal(result.usage.estimated, true);
+    assert.equal(result.usage.total_tokens > 0, true);
   } finally {
     globalThis.fetch = originalFetch;
   }

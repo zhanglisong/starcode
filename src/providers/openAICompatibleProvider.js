@@ -27,16 +27,62 @@ function shouldSendAuthorization(providerName) {
   return providerName !== "ollama";
 }
 
-function buildResultFromPayload(payload, providerMeta) {
-  const choice = payload?.choices?.[0] ?? {};
-  const msg = choice.message ?? {};
+function estimateTokenCount(value) {
+  const text = typeof value === "string" ? value : JSON.stringify(value ?? "");
+  const chars = text?.length ?? 0;
+  return Math.max(1, Math.ceil(chars / 4));
+}
+
+function hasUsageTokens(usage) {
+  if (!usage || typeof usage !== "object") {
+    return false;
+  }
+  return Number.isFinite(Number(usage.total_tokens)) || Number.isFinite(Number(usage.prompt_tokens));
+}
+
+function normalizeUsage(usage, { messages = [], tools = [], outputText = "" } = {}) {
+  if (hasUsageTokens(usage)) {
+    const prompt = Number(usage.prompt_tokens ?? 0);
+    const completion = Number(usage.completion_tokens ?? 0);
+    const total = Number(usage.total_tokens ?? prompt + completion);
+    return {
+      ...usage,
+      prompt_tokens: Number.isFinite(prompt) ? prompt : 0,
+      completion_tokens: Number.isFinite(completion) ? completion : 0,
+      total_tokens: Number.isFinite(total) ? total : 0,
+      estimated: usage?.estimated === true
+    };
+  }
+
+  const promptTokens = estimateTokenCount({
+    messages,
+    tools
+  });
+  const completionTokens = estimateTokenCount(outputText || "");
 
   return {
-    outputText: msg.content ?? "",
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: promptTokens + completionTokens,
+    estimated: true
+  };
+}
+
+function buildResultFromPayload(payload, providerMeta, requestMeta = {}) {
+  const choice = payload?.choices?.[0] ?? {};
+  const msg = choice.message ?? {};
+  const outputText = msg.content ?? "";
+
+  return {
+    outputText,
     finishReason: choice.finish_reason ?? "unknown",
     toolCalls: msg.tool_calls ?? [],
     message: msg,
-    usage: payload?.usage ?? {},
+    usage: normalizeUsage(payload?.usage, {
+      messages: requestMeta.messages,
+      tools: requestMeta.tools,
+      outputText
+    }),
     raw: payload,
     providerMeta
   };
@@ -141,11 +187,18 @@ export class OpenAICompatibleProvider {
     }
 
     const payload = await response.json();
-    return buildResultFromPayload(payload, {
-      provider: this.providerName,
-      endpoint: this.endpoint,
-      constraints: effective.constraints
-    });
+    return buildResultFromPayload(
+      payload,
+      {
+        provider: this.providerName,
+        endpoint: this.endpoint,
+        constraints: effective.constraints
+      },
+      {
+        messages,
+        tools
+      }
+    );
   }
 
   async completeStream({ model, messages, temperature = 0.2, topP = 1, maxTokens = 1024, tools = [], onDelta }) {
@@ -341,12 +394,18 @@ export class OpenAICompatibleProvider {
       message.tool_calls = toolCalls;
     }
 
+    const normalizedUsage = normalizeUsage(usage, {
+      messages,
+      tools,
+      outputText: content
+    });
+
     return {
       outputText: content,
       finishReason,
       toolCalls,
       message,
-      usage,
+      usage: normalizedUsage,
       raw: {
         streaming: true
       },

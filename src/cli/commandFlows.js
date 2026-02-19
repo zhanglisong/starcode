@@ -118,6 +118,14 @@ export function parseSlashCommand(input) {
     };
   }
 
+  if (command === "status") {
+    return {
+      kind: "status",
+      command,
+      args
+    };
+  }
+
   const definition = COMMAND_DEFINITIONS[command];
   if (!definition) {
     return {
@@ -139,5 +147,7 @@ export function renderSlashHelpText() {
   const rows = Object.entries(COMMAND_DEFINITIONS)
     .map(([command, definition]) => `/${command} - ${definition.description}`)
     .join("\n");
-  return [`Available slash commands:`, rows, `/help - Show this command list.`].join("\n");
+  return [`Available slash commands:`, rows, `/status - Show current model/token/latency status.`, `/help - Show this command list.`].join(
+    "\n"
+  );
 }

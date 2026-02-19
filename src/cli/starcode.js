@@ -124,6 +124,59 @@ function formatMs(value) {
   return `${(parsed / 1000).toFixed(2)}s`;
 }
 
+function clampNumber(value, fallback = 0, min = 0) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(min, parsed);
+}
+
+function formatPercent(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return "0%";
+  }
+  if (parsed >= 100) {
+    return "100%";
+  }
+  return `${parsed.toFixed(parsed < 10 ? 2 : 1)}%`;
+}
+
+function formatUsd(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return "$0.00";
+  }
+  if (parsed < 0.01) {
+    return `$${parsed.toFixed(4)}`;
+  }
+  return `$${parsed.toFixed(2)}`;
+}
+
+function resolveUsage(usage) {
+  const promptTokens = clampNumber(usage?.prompt_tokens, 0, 0);
+  const completionTokens = clampNumber(usage?.completion_tokens, 0, 0);
+  const totalTokens = clampNumber(usage?.total_tokens, promptTokens + completionTokens, 0);
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    estimated: usage?.estimated === true
+  };
+}
+
+function computeSpendUsd({
+  promptTokens,
+  completionTokens,
+  inputCostPer1k,
+  outputCostPer1k
+}) {
+  const promptCost = (clampNumber(promptTokens, 0, 0) / 1000) * clampNumber(inputCostPer1k, 0, 0);
+  const completionCost = (clampNumber(completionTokens, 0, 0) / 1000) * clampNumber(outputCostPer1k, 0, 0);
+  return promptCost + completionCost;
+}
+
 function renderStartupPanel({
   providerName,
   model,
@@ -133,6 +186,9 @@ function renderStartupPanel({
   enableSessionSummary,
   enableCliHistory,
   mcpServerCount,
+  contextWindowTokens,
+  inputCostPer1k,
+  outputCostPer1k,
   promptVersion,
   toolSchemaVersion,
   modelIoDebugEnabled,
@@ -142,10 +198,11 @@ function renderStartupPanel({
   const providerLabel = providerName && String(providerName).trim() ? String(providerName).trim() : "(unset)";
   const lines = [
     "┌─────────────────────────────── Starcode ───────────────────────────────┐",
-    `│ model=${modelLabel} provider=${providerLabel} streaming=${enableStreaming ? "on" : "off"} planning=${enablePlanningMode ? "on" : "off"} │`,
+    `│ build · ${modelLabel} · provider=${providerLabel} · streaming=${enableStreaming ? "on" : "off"} · planning=${enablePlanningMode ? "on" : "off"} │`,
     `│ workspace=${workspaceDir} │`,
-    `│ mcp_servers=${mcpServerCount} session_summary=${enableSessionSummary ? "on" : "off"} history=${enableCliHistory ? "on" : "off"} │`,
-    `│ prompt=${promptVersion} tools=${toolSchemaVersion} │`
+    `│ context window=${formatTokens(contextWindowTokens)} tokens · pricing(in/out per 1k)=${inputCostPer1k}/${outputCostPer1k} │`,
+    `│ mcp_servers=${mcpServerCount} · session_summary=${enableSessionSummary ? "on" : "off"} · history=${enableCliHistory ? "on" : "off"} │`,
+    `│ prompt=${promptVersion} · tools=${toolSchemaVersion} │`
   ];
 
   if (modelIoDebugEnabled) {
@@ -159,23 +216,45 @@ function renderStartupPanel({
 
 function renderTurnStats({
   model,
+  providerName,
   usage,
   latencyMs,
   latencyBreakdown,
   traceId,
   flushed,
-  cumulativeTokens
+  cumulativePromptTokens,
+  cumulativeCompletionTokens,
+  cumulativeTokens,
+  contextWindowTokens,
+  cumulativeSpendUsd
 }) {
   const modelLabel = model && String(model).trim() ? String(model).trim() : "(unset)";
-  const promptTokens = Number(usage?.prompt_tokens ?? 0);
-  const completionTokens = Number(usage?.completion_tokens ?? 0);
-  const totalTokens = Number(usage?.total_tokens ?? promptTokens + completionTokens);
+  const providerLabel = providerName && String(providerName).trim() ? String(providerName).trim() : "(unset)";
+  const resolvedUsage = resolveUsage(usage);
   const breakdown = latencyBreakdown ?? {};
+  const usedPct = contextWindowTokens > 0 ? (cumulativeTokens / contextWindowTokens) * 100 : 0;
+  const sourceLabel = resolvedUsage.estimated ? "estimated" : "provider";
 
   return [
     "stats>",
-    `model=${modelLabel} tokens(prompt/completion/total)=${formatTokens(promptTokens)}/${formatTokens(completionTokens)}/${formatTokens(totalTokens)} cumulative_total=${formatTokens(cumulativeTokens)}`,
-    `latency(total/model/tool/other)=${formatMs(latencyMs)}/${formatMs(breakdown.model_ms)}/${formatMs(breakdown.tool_ms)}/${formatMs(breakdown.other_ms)} trace_id=${traceId} flushed=${flushed}`
+    `build · ${modelLabel} · ${providerLabel} · ${formatMs(latencyMs)}`,
+    `context · ${formatTokens(cumulativeTokens)}/${formatTokens(contextWindowTokens)} tokens · ${formatPercent(usedPct)} used · ${formatUsd(cumulativeSpendUsd)} spent`,
+    `tokens · turn=${formatTokens(resolvedUsage.promptTokens)}/${formatTokens(resolvedUsage.completionTokens)}/${formatTokens(resolvedUsage.totalTokens)} · session=${formatTokens(cumulativePromptTokens)}/${formatTokens(cumulativeCompletionTokens)}/${formatTokens(cumulativeTokens)} · source=${sourceLabel}`,
+    `latency · total/model/tool/other=${formatMs(latencyMs)}/${formatMs(breakdown.model_ms)}/${formatMs(breakdown.tool_ms)}/${formatMs(breakdown.other_ms)}`,
+    `trace · id=${traceId} · flushed=${flushed}`
+  ].join("\n");
+}
+
+function renderStatusWithoutTurns({ model, providerName, contextWindowTokens, cumulativeSpendUsd }) {
+  const modelLabel = model && String(model).trim() ? String(model).trim() : "(unset)";
+  const providerLabel = providerName && String(providerName).trim() ? String(providerName).trim() : "(unset)";
+  return [
+    "stats>",
+    `build · ${modelLabel} · ${providerLabel} · n/a`,
+    `context · 0/${formatTokens(contextWindowTokens)} tokens · 0% used · ${formatUsd(cumulativeSpendUsd)} spent`,
+    "tokens · turn=0/0/0 · session=0/0/0 · source=n/a",
+    "latency · total/model/tool/other=0ms/0ms/0ms/0ms",
+    "trace · id=n/a · flushed=0"
   ].join("\n");
 }
 
@@ -235,6 +314,13 @@ async function main() {
   });
   const model = runtimeModelConfig.model;
   const workspaceDir = process.env.STARCODE_WORKSPACE_DIR ?? process.cwd();
+  const contextWindowTokens = clampNumber(
+    process.env.STARCODE_CONTEXT_WINDOW_TOKENS ?? process.env.MODEL_CONTEXT_WINDOW ?? 128000,
+    128000,
+    1
+  );
+  const inputCostPer1k = clampNumber(process.env.STARCODE_TOKEN_COST_INPUT_PER_1K ?? 0, 0, 0);
+  const outputCostPer1k = clampNumber(process.env.STARCODE_TOKEN_COST_OUTPUT_PER_1K ?? 0, 0, 0);
   const enableStreaming = process.env.STARCODE_ENABLE_STREAMING !== "false";
   const enablePlanningMode = process.env.STARCODE_ENABLE_PLANNING_MODE === "true";
   const enableSessionSummary = process.env.STARCODE_ENABLE_SESSION_SUMMARY !== "false";
@@ -344,6 +430,9 @@ async function main() {
       enableSessionSummary,
       enableCliHistory,
       mcpServerCount: runtimeMcpConfig.servers.length,
+      contextWindowTokens,
+      inputCostPer1k,
+      outputCostPer1k,
       promptVersion,
       toolSchemaVersion,
       modelIoDebugEnabled,
@@ -351,7 +440,11 @@ async function main() {
     })
   );
 
+  let cumulativePromptTokens = 0;
+  let cumulativeCompletionTokens = 0;
   let cumulativeTokens = 0;
+  let cumulativeSpendUsd = 0;
+  let latestTurnSnapshot = null;
 
   while (true) {
     const rawLine = await nextLine(rl);
@@ -379,6 +472,36 @@ async function main() {
     const slashCommand = parseSlashCommand(line);
     if (slashCommand?.kind === "help") {
       output.write(`${renderSlashHelpText()}\n`);
+      continue;
+    }
+    if (slashCommand?.kind === "status") {
+      if (!latestTurnSnapshot) {
+        output.write(
+          `${renderStatusWithoutTurns({
+            model,
+            providerName: provider.providerName,
+            contextWindowTokens,
+            cumulativeSpendUsd
+          })}\n`
+        );
+      } else {
+        output.write(
+          `${renderTurnStats({
+            model,
+            providerName: provider.providerName,
+            usage: latestTurnSnapshot.usage,
+            latencyMs: latestTurnSnapshot.latencyMs,
+            latencyBreakdown: latestTurnSnapshot.latencyBreakdown,
+            traceId: latestTurnSnapshot.traceId,
+            flushed: latestTurnSnapshot.flushed,
+            cumulativePromptTokens,
+            cumulativeCompletionTokens,
+            cumulativeTokens,
+            contextWindowTokens,
+            cumulativeSpendUsd
+          })}\n`
+        );
+      }
       continue;
     }
     if (slashCommand?.kind === "unknown") {
@@ -412,21 +535,23 @@ async function main() {
       } else {
         output.write(`assistant> ${turn.outputText}\n`);
       }
-      const promptTokens = Number(turn.usage?.prompt_tokens ?? 0);
-      const completionTokens = Number(turn.usage?.completion_tokens ?? 0);
-      const totalTokens = Number(turn.usage?.total_tokens ?? promptTokens + completionTokens);
-      cumulativeTokens += Number.isFinite(totalTokens) ? Math.max(0, totalTokens) : 0;
-      output.write(
-        `${renderTurnStats({
-          model,
-          usage: turn.usage,
-          latencyMs: turn.latencyMs,
-          latencyBreakdown: turn.latencyBreakdown,
-          traceId: turn.traceId,
-          flushed: turn.flush.flushed,
-          cumulativeTokens
-        })}\n`
-      );
+      const usage = resolveUsage(turn.usage);
+      cumulativePromptTokens += usage.promptTokens;
+      cumulativeCompletionTokens += usage.completionTokens;
+      cumulativeTokens += usage.totalTokens;
+      cumulativeSpendUsd += computeSpendUsd({
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        inputCostPer1k,
+        outputCostPer1k
+      });
+      latestTurnSnapshot = {
+        usage: turn.usage,
+        latencyMs: turn.latencyMs,
+        latencyBreakdown: turn.latencyBreakdown,
+        traceId: turn.traceId,
+        flushed: turn.flush.flushed
+      };
     } catch (error) {
       output.write(`error> ${error.message}\n`);
     }

@@ -47,6 +47,15 @@ test("parseSlashCommand returns help sentinel for /help", () => {
   });
 });
 
+test("parseSlashCommand returns status sentinel for /status", () => {
+  const parsed = parseSlashCommand("/status");
+  assert.deepEqual(parsed, {
+    kind: "status",
+    command: "status",
+    args: ""
+  });
+});
+
 test("parseSlashCommand returns unknown sentinel for unsupported slash command", () => {
   const parsed = parseSlashCommand("/unknown x");
   assert.deepEqual(parsed, {
@@ -62,5 +71,6 @@ test("renderSlashHelpText lists all workflow commands", () => {
   assert.match(help, /\/test/);
   assert.match(help, /\/explain/);
   assert.match(help, /\/commit/);
+  assert.match(help, /\/status/);
   assert.match(help, /\/help/);
 });
