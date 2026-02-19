@@ -465,6 +465,75 @@ async function promptPermissionDecision({ rl, uiMode, request, matched }) {
   };
 }
 
+async function promptQuestionAnswers({ rl, uiMode, questions }) {
+  if (!rl) {
+    return {
+      answers: Array.isArray(questions)
+        ? questions.map((item) => ({
+            id: item?.id ?? "question",
+            answers: []
+          }))
+        : []
+    };
+  }
+
+  const normalized = Array.isArray(questions) ? questions : [];
+  const answers = [];
+  for (const question of normalized) {
+    const id = String(question?.id ?? "question").trim() || "question";
+    const promptLine = String(question?.question ?? "").trim() || "Provide answer";
+    const header = String(question?.header ?? "").trim();
+    const options = Array.isArray(question?.options) ? question.options : [];
+
+    if (header) {
+      const line = `question> ${header}`;
+      output.write(uiMode === UI_MODES.TUI ? `${prefixLines(line)}\n` : `${line}\n`);
+    }
+    output.write(uiMode === UI_MODES.TUI ? `${prefixLines(`question> ${promptLine}`)}\n` : `question> ${promptLine}\n`);
+
+    if (options.length > 0) {
+      options.forEach((option, index) => {
+        const label = String(option?.label ?? "").trim();
+        const description = String(option?.description ?? "").trim();
+        if (!label) {
+          return;
+        }
+        output.write(
+          uiMode === UI_MODES.TUI
+            ? `${prefixLines(`question> ${index + 1}. ${label}${description ? ` - ${description}` : ""}`)}\n`
+            : `question> ${index + 1}. ${label}${description ? ` - ${description}` : ""}\n`
+        );
+      });
+    }
+
+    const raw = String((await rl.question("question> answer (number, comma list, or text): ")) ?? "").trim();
+    if (!raw) {
+      answers.push({ id, answers: [] });
+      continue;
+    }
+
+    const tokens = raw.split(",").map((item) => item.trim()).filter(Boolean);
+    const mapped = [];
+    for (const token of tokens) {
+      const index = Number(token);
+      if (Number.isFinite(index) && index >= 1 && index <= options.length) {
+        const value = String(options[index - 1]?.label ?? "").trim();
+        if (value) {
+          mapped.push(value);
+        }
+      } else {
+        mapped.push(token);
+      }
+    }
+    answers.push({
+      id,
+      answers: mapped.length ? mapped : [raw]
+    });
+  }
+
+  return { answers };
+}
+
 async function main() {
   const parsedCli = parseInteractiveCliFlags(process.argv.slice(2));
   const uiMode = parsedCli.uiMode;
@@ -588,7 +657,12 @@ async function main() {
     webSearchEndpoint: process.env.STARCODE_WEB_SEARCH_ENDPOINT ?? "",
     webSearchApiKey: process.env.STARCODE_WEB_SEARCH_API_KEY ?? "",
     webSearchTimeoutMs: Number(process.env.STARCODE_WEB_SEARCH_TIMEOUT_MS ?? 8000),
-    webSearchMaxResults: Number(process.env.STARCODE_WEB_SEARCH_MAX_RESULTS ?? 8)
+    webSearchMaxResults: Number(process.env.STARCODE_WEB_SEARCH_MAX_RESULTS ?? 8),
+    webFetchTimeoutMs: Number(process.env.STARCODE_WEB_FETCH_TIMEOUT_MS ?? 12_000),
+    webFetchMaxBytes: Number(process.env.STARCODE_WEB_FETCH_MAX_BYTES ?? 300_000),
+    codeSearchMaxMatches: Number(process.env.STARCODE_CODE_SEARCH_MAX_MATCHES ?? 120),
+    enableCustomTools: process.env.STARCODE_ENABLE_CUSTOM_TOOLS !== "false",
+    customToolDirs: parseCsv(process.env.STARCODE_CUSTOM_TOOL_DIRS || "tools")
   });
   const gitContextProvider = new GitContextProvider({
     baseDir: workspaceDir,
@@ -631,6 +705,14 @@ async function main() {
 
   if (enableCliHistory && Array.isArray(rl.history) && cliHistoryEntries.length > 0) {
     rl.history = [...cliHistoryEntries].reverse();
+  }
+
+  if (localTools?.setQuestionHandler instanceof Function) {
+    localTools.setQuestionHandler((request) => promptQuestionAnswers({
+      ...request,
+      rl,
+      uiMode
+    }));
   }
 
   const permissionManager = new PermissionManager({

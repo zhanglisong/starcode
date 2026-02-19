@@ -47,7 +47,22 @@ export function resolveToolPermissionRequest(call) {
     };
   }
 
-  if (["list_files", "glob_files", "grep_files", "read_file"].includes(name)) {
+  if (
+    [
+      "list_files",
+      "ls",
+      "glob_files",
+      "glob",
+      "grep_files",
+      "grep",
+      "read_file",
+      "read",
+      "todoread",
+      "codesearch",
+      "lsp",
+      "skill"
+    ].includes(name)
+  ) {
     return {
       permission: "read",
       patterns: pathPatterns(args, ["path"]),
@@ -58,7 +73,7 @@ export function resolveToolPermissionRequest(call) {
     };
   }
 
-  if (name === "execute_shell") {
+  if (name === "execute_shell" || name === "bash") {
     return {
       permission: "bash",
       patterns: [toPattern(args?.command, "*")],
@@ -70,10 +85,10 @@ export function resolveToolPermissionRequest(call) {
     };
   }
 
-  if (name === "search_web") {
+  if (name === "search_web" || name === "websearch" || name === "webfetch") {
     return {
       permission: "web",
-      patterns: [toPattern(args?.query, "*")],
+      patterns: [toPattern(args?.query ?? args?.url, "*")],
       always: ["*"],
       metadata: {
         tool_name: name
@@ -107,8 +122,16 @@ export function resolveToolPermissionRequest(call) {
   if (
     [
       "write_file",
+      "write",
       "create_file",
+      "todowrite",
+      "plan_enter",
+      "plan_exit",
+      "task",
+      "batch",
+      "question",
       "edit_file",
+      "edit",
       "replace_in_file",
       "insert_in_file",
       "patch_file",

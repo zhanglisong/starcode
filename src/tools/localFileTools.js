@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { applyUpdateChunksToLines, parseApplyPatchText } from "./patchParser.js";
 
 const DEFAULT_SHELL_ALLOW_COMMANDS = [
@@ -38,6 +39,32 @@ const DEFAULT_SHELL_DENY_PATTERNS = [
 
 const DEFAULT_WEB_SEARCH_TIMEOUT_MS = 8_000;
 const DEFAULT_WEB_SEARCH_MAX_RESULTS = 8;
+const DEFAULT_WEB_FETCH_TIMEOUT_MS = 12_000;
+const DEFAULT_WEB_FETCH_MAX_BYTES = 300_000;
+const DEFAULT_CODE_SEARCH_MAX_MATCHES = 120;
+
+const DEFAULT_SYMBOL_PATTERNS = [
+  {
+    kind: "function",
+    regex: /\bfunction\s+([A-Za-z_$][\w$]*)\s*\(/g
+  },
+  {
+    kind: "class",
+    regex: /\bclass\s+([A-Za-z_$][\w$]*)\b/g
+  },
+  {
+    kind: "interface",
+    regex: /\binterface\s+([A-Za-z_$][\w$]*)\b/g
+  },
+  {
+    kind: "type",
+    regex: /\btype\s+([A-Za-z_$][\w$]*)\b/g
+  },
+  {
+    kind: "const",
+    regex: /\bconst\s+([A-Za-z_$][\w$]*)\s*=/g
+  }
+];
 
 function safeJsonParse(raw) {
   if (typeof raw !== "string") {
@@ -180,6 +207,135 @@ function withTimeoutAbort(ms) {
   };
 }
 
+function stripHtml(value) {
+  return String(value ?? "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<\/?(p|div|section|article|header|footer|main|aside|li|ul|ol|h1|h2|h3|h4|h5|h6|pre|br)[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function extractLinksFromHtml(html, max = 80) {
+  const links = [];
+  const seen = new Set();
+  const text = String(html ?? "");
+  const regex = /<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>/gi;
+  let match;
+  while ((match = regex.exec(text)) && links.length < max) {
+    const href = String(match[1] ?? "").trim();
+    if (!href || seen.has(href)) {
+      continue;
+    }
+    seen.add(href);
+    links.push(href);
+  }
+  return links;
+}
+
+function normalizeTodoStatus(value) {
+  const normalized = String(value ?? "pending").trim().toLowerCase();
+  if (normalized === "completed" || normalized === "done") {
+    return "completed";
+  }
+  if (normalized === "in_progress" || normalized === "in-progress" || normalized === "active") {
+    return "in_progress";
+  }
+  return "pending";
+}
+
+function normalizeTodoItem(item, index) {
+  if (typeof item === "string") {
+    const content = item.trim();
+    if (!content) {
+      return null;
+    }
+    return {
+      id: `todo_${index + 1}`,
+      content,
+      status: "pending"
+    };
+  }
+
+  if (!item || typeof item !== "object") {
+    return null;
+  }
+
+  const content = String(item.content ?? item.text ?? "").trim();
+  if (!content) {
+    return null;
+  }
+
+  const idCandidate = String(item.id ?? "").trim();
+  const safeId = idCandidate || `todo_${index + 1}`;
+  return {
+    id: safeId,
+    content,
+    status: normalizeTodoStatus(item.status)
+  };
+}
+
+function findLineColumnFromOffset(text, offset) {
+  const body = String(text ?? "");
+  let line = 1;
+  let column = 1;
+  for (let i = 0; i < body.length && i < offset; i += 1) {
+    if (body[i] === "\n") {
+      line += 1;
+      column = 1;
+    } else {
+      column += 1;
+    }
+  }
+  return { line, column };
+}
+
+function toToolName(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, "_");
+}
+
+function normalizeCustomToolDefinition(raw, fallbackName) {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+
+  const execute = raw.execute;
+  if (typeof execute !== "function") {
+    return null;
+  }
+
+  const name = toToolName(raw.name ?? fallbackName);
+  if (!name) {
+    return null;
+  }
+
+  const description = String(raw.description ?? `Custom tool ${name}`).trim();
+  const parameters =
+    raw.parameters && typeof raw.parameters === "object"
+      ? raw.parameters
+      : {
+          type: "object",
+          properties: {}
+        };
+
+  return {
+    name,
+    description,
+    parameters,
+    execute
+  };
+}
+
 function compileGlobPattern(pattern) {
   const raw = toPosixPath(String(pattern || "**/*").trim() || "**/*");
   const doubleSlashToken = "\u0001";
@@ -319,7 +475,12 @@ export class LocalFileTools {
     webSearchEndpoint = "",
     webSearchApiKey = "",
     webSearchTimeoutMs = DEFAULT_WEB_SEARCH_TIMEOUT_MS,
-    webSearchMaxResults = DEFAULT_WEB_SEARCH_MAX_RESULTS
+    webSearchMaxResults = DEFAULT_WEB_SEARCH_MAX_RESULTS,
+    webFetchTimeoutMs = DEFAULT_WEB_FETCH_TIMEOUT_MS,
+    webFetchMaxBytes = DEFAULT_WEB_FETCH_MAX_BYTES,
+    codeSearchMaxMatches = DEFAULT_CODE_SEARCH_MAX_MATCHES,
+    enableCustomTools = true,
+    customToolDirs = ["tools"]
   } = {}) {
     this.baseDir = path.resolve(baseDir);
     this.maxReadBytes = maxReadBytes;
@@ -346,10 +507,133 @@ export class LocalFileTools {
     this.webSearchApiKey = String(webSearchApiKey || "").trim();
     this.webSearchTimeoutMs = clampNumber(webSearchTimeoutMs, DEFAULT_WEB_SEARCH_TIMEOUT_MS, 200, 60_000);
     this.webSearchMaxResults = clampNumber(webSearchMaxResults, DEFAULT_WEB_SEARCH_MAX_RESULTS, 1, 20);
+    this.webFetchTimeoutMs = clampNumber(webFetchTimeoutMs, DEFAULT_WEB_FETCH_TIMEOUT_MS, 200, 120_000);
+    this.webFetchMaxBytes = clampNumber(webFetchMaxBytes, DEFAULT_WEB_FETCH_MAX_BYTES, 8_192, 2_000_000);
+    this.codeSearchMaxMatches = clampNumber(codeSearchMaxMatches, DEFAULT_CODE_SEARCH_MAX_MATCHES, 1, 2_000);
+    this.enableCustomTools = enableCustomTools !== false;
+    this.customToolDirs = Array.isArray(customToolDirs) ? customToolDirs.map((value) => String(value).trim()).filter(Boolean) : [];
+    this.todoItems = [];
+    this.planState = {
+      active: false,
+      goal: "",
+      steps: [],
+      entered_at: null,
+      exited_at: null,
+      summary: ""
+    };
+    this.taskRunner = null;
+    this.questionHandler = null;
+    this.customTools = new Map();
+    this.customToolsLoaded = false;
+    this.customToolsLoadError = null;
+    this.customToolsLoadPromise = null;
   }
 
-  getToolDefinitions() {
-    return [
+  setTaskRunner(fn) {
+    this.taskRunner = typeof fn === "function" ? fn : null;
+  }
+
+  setQuestionHandler(fn) {
+    this.questionHandler = typeof fn === "function" ? fn : null;
+  }
+
+  async ensureCustomToolsLoaded() {
+    if (!this.enableCustomTools) {
+      return this.customTools;
+    }
+    if (this.customToolsLoaded) {
+      return this.customTools;
+    }
+    if (this.customToolsLoadPromise) {
+      await this.customToolsLoadPromise;
+      return this.customTools;
+    }
+
+    this.customToolsLoadPromise = (async () => {
+      const discovered = new Map();
+      for (const dir of this.customToolDirs) {
+        let resolvedDir;
+        try {
+          resolvedDir = this.resolveWithinBase(dir);
+        } catch {
+          continue;
+        }
+
+        let entries = [];
+        try {
+          entries = await fs.readdir(resolvedDir, { withFileTypes: true });
+        } catch (error) {
+          if (error?.code === "ENOENT") {
+            continue;
+          }
+          throw error;
+        }
+
+        for (const entry of entries) {
+          if (!entry.isFile()) {
+            continue;
+          }
+          if (!/\.(mjs|cjs|js)$/i.test(entry.name)) {
+            continue;
+          }
+
+          const absolutePath = path.join(resolvedDir, entry.name);
+          const baseName = toToolName(path.basename(entry.name, path.extname(entry.name)));
+          try {
+            const url = pathToFileURL(absolutePath).href;
+            const mod = await import(url);
+            const candidates = [];
+            if (mod?.default && typeof mod.default === "object") {
+              if (typeof mod.default.execute === "function") {
+                candidates.push(mod.default);
+              } else {
+                for (const [exportName, exportValue] of Object.entries(mod.default)) {
+                  if (exportValue && typeof exportValue === "object") {
+                    candidates.push({
+                      name: exportValue.name ?? exportName,
+                      ...exportValue
+                    });
+                  }
+                }
+              }
+            }
+            for (const [exportName, exportValue] of Object.entries(mod ?? {})) {
+              if (exportName === "default") {
+                continue;
+              }
+              if (exportValue && typeof exportValue === "object") {
+                candidates.push({
+                  name: exportValue.name ?? exportName,
+                  ...exportValue
+                });
+              }
+            }
+
+            for (const candidate of candidates) {
+              const normalized = normalizeCustomToolDefinition(candidate, baseName);
+              if (!normalized) {
+                continue;
+              }
+              discovered.set(normalized.name, normalized);
+            }
+          } catch (error) {
+            this.customToolsLoadError = `custom tool load failed at ${path.relative(this.baseDir, absolutePath)}: ${error.message}`;
+          }
+        }
+      }
+      this.customTools = discovered;
+      this.customToolsLoaded = true;
+      this.customToolsLoadPromise = null;
+    })();
+
+    await this.customToolsLoadPromise;
+    return this.customTools;
+  }
+
+  async getToolDefinitions({ includeTaskTool = true, includePlanTools = true } = {}) {
+    await this.ensureCustomToolsLoaded();
+
+    const definitions = [
       {
         type: "function",
         function: {
@@ -373,6 +657,20 @@ export class LocalFileTools {
       {
         type: "function",
         function: {
+          name: "ls",
+          description: "Alias for list_files.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+              recursive: { type: "boolean" }
+            }
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
           name: "glob_files",
           description: "Find files by glob pattern under workspace.",
           parameters: {
@@ -386,6 +684,21 @@ export class LocalFileTools {
                 type: "string",
                 description: "Optional base directory under workspace."
               }
+            },
+            required: ["pattern"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "glob",
+          description: "Alias for glob_files.",
+          parameters: {
+            type: "object",
+            properties: {
+              pattern: { type: "string" },
+              path: { type: "string" }
             },
             required: ["pattern"]
           }
@@ -428,6 +741,25 @@ export class LocalFileTools {
       {
         type: "function",
         function: {
+          name: "grep",
+          description: "Alias for grep_files.",
+          parameters: {
+            type: "object",
+            properties: {
+              pattern: { type: "string" },
+              path: { type: "string" },
+              recursive: { type: "boolean" },
+              regex: { type: "boolean" },
+              case_sensitive: { type: "boolean" },
+              max_matches: { type: "number" }
+            },
+            required: ["pattern"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
           name: "read_file",
           description: "Read file content from workspace.",
           parameters: {
@@ -437,6 +769,20 @@ export class LocalFileTools {
                 type: "string",
                 description: "File path relative to workspace root."
               }
+            },
+            required: ["path"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "read",
+          description: "Alias for read_file.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string" }
             },
             required: ["path"]
           }
@@ -470,6 +816,22 @@ export class LocalFileTools {
       {
         type: "function",
         function: {
+          name: "write",
+          description: "Alias for write_file.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+              content: { type: "string" },
+              append: { type: "boolean" }
+            },
+            required: ["path", "content"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
           name: "create_file",
           description: "Create file; fails if file exists unless overwrite=true.",
           parameters: {
@@ -480,6 +842,23 @@ export class LocalFileTools {
               overwrite: { type: "boolean" }
             },
             required: ["path"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "edit",
+          description: "Alias for edit_file.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+              search: { type: "string" },
+              replace: { type: "string" },
+              all: { type: "boolean" }
+            },
+            required: ["path", "search", "replace"]
           }
         }
       },
@@ -615,23 +994,33 @@ export class LocalFileTools {
           parameters: {
             type: "object",
             properties: {
-              query: {
-                type: "string",
-                description: "Search query text."
-              },
-              count: {
-                type: "number",
-                description: "Maximum number of results to return."
-              },
+              query: { type: "string" },
+              count: { type: "number" },
               domains: {
                 type: "array",
-                items: { type: "string" },
-                description: "Optional domain allowlist filter."
+                items: { type: "string" }
               },
-              safe_search: {
-                type: "boolean",
-                description: "Prefer safer search results when supported."
-              }
+              safe_search: { type: "boolean" }
+            },
+            required: ["query"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "websearch",
+          description: "Alias for search_web.",
+          parameters: {
+            type: "object",
+            properties: {
+              query: { type: "string" },
+              count: { type: "number" },
+              domains: {
+                type: "array",
+                items: { type: "string" }
+              },
+              safe_search: { type: "boolean" }
             },
             required: ["query"]
           }
@@ -646,24 +1035,268 @@ export class LocalFileTools {
           parameters: {
             type: "object",
             properties: {
-              command: {
-                type: "string",
-                description: "Shell command to run."
-              },
-              cwd: {
-                type: "string",
-                description: "Optional workspace-relative working directory."
-              },
-              timeout_ms: {
-                type: "number",
-                description: "Optional timeout override in milliseconds."
-              }
+              command: { type: "string" },
+              cwd: { type: "string" },
+              timeout_ms: { type: "number" }
             },
             required: ["command"]
           }
         }
+      },
+      {
+        type: "function",
+        function: {
+          name: "bash",
+          description: "Alias for execute_shell.",
+          parameters: {
+            type: "object",
+            properties: {
+              command: { type: "string" },
+              cwd: { type: "string" },
+              timeout_ms: { type: "number" }
+            },
+            required: ["command"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "webfetch",
+          description: "Fetch a URL and return normalized response content with size and timeout limits.",
+          parameters: {
+            type: "object",
+            properties: {
+              url: { type: "string" },
+              method: { type: "string" },
+              headers: { type: "object" },
+              format: { type: "string", description: "text|html|json" },
+              timeout_ms: { type: "number" },
+              max_bytes: { type: "number" }
+            },
+            required: ["url"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "codesearch",
+          description: "Search code in workspace and return ranked file/line matches.",
+          parameters: {
+            type: "object",
+            properties: {
+              query: { type: "string" },
+              path: { type: "string" },
+              regex: { type: "boolean" },
+              case_sensitive: { type: "boolean" },
+              max_matches: { type: "number" }
+            },
+            required: ["query"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "lsp",
+          description: "Lightweight language-intelligence helper for symbols/definitions/diagnostics.",
+          parameters: {
+            type: "object",
+            properties: {
+              action: { type: "string", description: "symbols|definition|diagnostics" },
+              path: { type: "string" },
+              symbol: { type: "string" },
+              line: { type: "number" },
+              column: { type: "number" },
+              max_results: { type: "number" }
+            }
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "question",
+          description: "Ask one or more structured questions to the user and return selected answers.",
+          parameters: {
+            type: "object",
+            properties: {
+              questions: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    id: { type: "string" },
+                    header: { type: "string" },
+                    question: { type: "string" },
+                    multiple: { type: "boolean" },
+                    options: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          label: { type: "string" },
+                          description: { type: "string" }
+                        }
+                      }
+                    }
+                  },
+                  required: ["id", "question", "options"]
+                }
+              }
+            },
+            required: ["questions"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "todowrite",
+          description: "Write or merge todo items used for execution coordination.",
+          parameters: {
+            type: "object",
+            properties: {
+              todos: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    id: { type: "string" },
+                    content: { type: "string" },
+                    status: { type: "string" }
+                  }
+                }
+              },
+              merge: { type: "boolean" },
+              clear: { type: "boolean" }
+            }
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "todoread",
+          description: "Read current todo list state.",
+          parameters: {
+            type: "object",
+            properties: {}
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "skill",
+          description: "Load and summarize SKILL.md instructions from workspace.",
+          parameters: {
+            type: "object",
+            properties: {
+              name: { type: "string" },
+              path: { type: "string" },
+              query: { type: "string" },
+              max_lines: { type: "number" }
+            }
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "batch",
+          description: "Execute multiple tool calls in parallel or sequence with isolated outcomes.",
+          parameters: {
+            type: "object",
+            properties: {
+              calls: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    name: { type: "string" },
+                    tool: { type: "string" },
+                    arguments: {},
+                    input: {}
+                  }
+                }
+              },
+              parallel: { type: "boolean" },
+              continue_on_error: { type: "boolean" }
+            },
+            required: ["calls"]
+          }
+        }
       }
     ];
+
+    if (includeTaskTool) {
+      definitions.push({
+        type: "function",
+        function: {
+          name: "task",
+          description: "Delegate work to a scoped sub-task execution context.",
+          parameters: {
+            type: "object",
+            properties: {
+              prompt: { type: "string" },
+              max_tool_rounds: { type: "number" }
+            },
+            required: ["prompt"]
+          }
+        }
+      });
+    }
+
+    if (includePlanTools) {
+      definitions.push(
+        {
+          type: "function",
+          function: {
+            name: "plan_enter",
+            description: "Enter explicit planning mode and persist the active execution plan context.",
+            parameters: {
+              type: "object",
+              properties: {
+                goal: { type: "string" },
+                steps: {
+                  type: "array",
+                  items: { type: "string" }
+                }
+              },
+              required: ["goal"]
+            }
+          }
+        },
+        {
+          type: "function",
+          function: {
+            name: "plan_exit",
+            description: "Exit planning mode and persist summary for the just-completed plan.",
+            parameters: {
+              type: "object",
+              properties: {
+                summary: { type: "string" }
+              }
+            }
+          }
+        }
+      );
+    }
+
+    for (const tool of this.customTools.values()) {
+      definitions.push({
+        type: "function",
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters
+        }
+      });
+    }
+
+    return definitions;
   }
 
   resolveWithinBase(inputPath) {
@@ -1544,12 +2177,629 @@ export class LocalFileTools {
     }
   }
 
-  async executeToolCall(call) {
-    const fn = call?.function;
-    const name = fn?.name;
-    const args = safeJsonParse(fn?.arguments);
+  async executeWebFetch({ url, method = "GET", headers = {}, format = "text", timeout_ms, max_bytes } = {}) {
+    const target = String(url ?? "").trim();
+    if (!target) {
+      throw new Error("url is required");
+    }
 
-    switch (name) {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(target);
+    } catch {
+      throw new Error("invalid url");
+    }
+    if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+      throw new Error("only http/https urls are allowed");
+    }
+
+    const timeoutMs = clampNumber(timeout_ms, this.webFetchTimeoutMs, 200, 120_000);
+    const maxBytes = clampNumber(max_bytes, this.webFetchMaxBytes, 8_192, 2_000_000);
+    const timeout = withTimeoutAbort(timeoutMs);
+    const startedAt = Date.now();
+
+    try {
+      const safeHeaders = {};
+      if (headers && typeof headers === "object") {
+        for (const [key, value] of Object.entries(headers)) {
+          const safeKey = String(key).trim();
+          if (!safeKey) {
+            continue;
+          }
+          safeHeaders[safeKey] = String(value ?? "");
+        }
+      }
+      if (!safeHeaders["user-agent"] && !safeHeaders["User-Agent"]) {
+        safeHeaders["user-agent"] = "starcode/0.1 (webfetch-tool)";
+      }
+
+      const response = await fetch(parsedUrl, {
+        method: String(method ?? "GET").toUpperCase(),
+        headers: safeHeaders,
+        signal: timeout.signal,
+        redirect: "follow"
+      });
+      const raw = Buffer.from(await response.arrayBuffer());
+      const truncated = raw.length > maxBytes;
+      const body = truncated ? raw.subarray(0, maxBytes) : raw;
+      const contentType = String(response.headers?.get?.("content-type") ?? "").toLowerCase();
+      const bodyText = body.toString("utf8");
+
+      let content = bodyText;
+      let links = [];
+      let json = null;
+      const desiredFormat = String(format ?? "text").toLowerCase();
+
+      if (contentType.includes("text/html")) {
+        links = extractLinksFromHtml(bodyText, 100);
+        content = desiredFormat === "html" ? bodyText : stripHtml(bodyText);
+      } else if (contentType.includes("application/json") || desiredFormat === "json") {
+        try {
+          json = JSON.parse(bodyText);
+          content = JSON.stringify(json, null, 2);
+        } catch {
+          content = bodyText;
+        }
+      }
+
+      return {
+        ok: true,
+        url: parsedUrl.toString(),
+        status: response.status,
+        status_text: response.statusText,
+        content_type: contentType || "unknown",
+        bytes: raw.length,
+        truncated,
+        format: desiredFormat,
+        content,
+        links,
+        json,
+        duration_ms: Date.now() - startedAt
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        url: parsedUrl.toString(),
+        error: error.message,
+        duration_ms: Date.now() - startedAt
+      };
+    } finally {
+      timeout.clear();
+    }
+  }
+
+  async executeCodeSearch({ query, path: rawPath = ".", regex = false, case_sensitive = false, max_matches } = {}) {
+    if (!query || typeof query !== "string") {
+      throw new Error("query is required");
+    }
+
+    const limit = Number.isFinite(Number(max_matches))
+      ? Math.max(1, Math.min(2000, Number(max_matches)))
+      : this.codeSearchMaxMatches;
+
+    const result = await this.grepFiles({
+      pattern: query,
+      path: rawPath,
+      recursive: true,
+      regex: !!regex,
+      case_sensitive: !!case_sensitive,
+      max_matches: limit
+    });
+
+    const byFile = new Map();
+    for (const match of result.matches) {
+      const bucket = byFile.get(match.path) ?? {
+        path: match.path,
+        hits: 0,
+        first_line: match.line
+      };
+      bucket.hits += 1;
+      if (match.line < bucket.first_line) {
+        bucket.first_line = match.line;
+      }
+      byFile.set(match.path, bucket);
+    }
+
+    const files = [...byFile.values()].sort((a, b) => b.hits - a.hits || a.first_line - b.first_line);
+    return {
+      ok: true,
+      query,
+      regex: !!regex,
+      case_sensitive: !!case_sensitive,
+      path: result.path,
+      count: result.count,
+      files,
+      matches: result.matches,
+      truncated: result.truncated
+    };
+  }
+
+  async listSymbolsInFile(filePath, { maxResults = 100 } = {}) {
+    const absolute = this.resolveWithinBase(filePath);
+    const text = await fs.readFile(absolute, "utf8");
+    const symbols = [];
+
+    for (const pattern of DEFAULT_SYMBOL_PATTERNS) {
+      pattern.regex.lastIndex = 0;
+      let match;
+      while ((match = pattern.regex.exec(text))) {
+        const name = String(match[1] ?? "").trim();
+        if (!name) {
+          continue;
+        }
+        const offset = Number(match.index ?? 0);
+        const position = findLineColumnFromOffset(text, offset);
+        symbols.push({
+          name,
+          kind: pattern.kind,
+          line: position.line,
+          column: position.column
+        });
+        if (symbols.length >= maxResults) {
+          break;
+        }
+      }
+      if (symbols.length >= maxResults) {
+        break;
+      }
+    }
+
+    return symbols;
+  }
+
+  async runNodeSyntaxCheck(filePath) {
+    const absolute = this.resolveWithinBase(filePath);
+    return new Promise((resolve) => {
+      const child = spawn(process.execPath, ["--check", absolute], {
+        cwd: this.baseDir,
+        env: process.env
+      });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += String(chunk ?? "");
+      });
+      child.on("close", (code) => {
+        resolve({
+          ok: code === 0,
+          code: Number.isFinite(code) ? code : null,
+          message: stderr.trim()
+        });
+      });
+      child.on("error", (error) => {
+        resolve({
+          ok: false,
+          code: null,
+          message: error.message
+        });
+      });
+    });
+  }
+
+  async executeLsp({
+    action = "symbols",
+    path: rawPath,
+    symbol: symbolInput,
+    line,
+    column,
+    max_results
+  } = {}) {
+    const mode = String(action ?? "symbols").toLowerCase();
+    const maxResults = Number.isFinite(Number(max_results)) ? Math.max(1, Math.min(500, Number(max_results))) : 100;
+
+    if (mode === "symbols") {
+      if (!rawPath || typeof rawPath !== "string") {
+        throw new Error("path is required for action=symbols");
+      }
+      const symbols = await this.listSymbolsInFile(rawPath, { maxResults });
+      return {
+        ok: true,
+        action: mode,
+        provider: "builtin-lite",
+        path: String(rawPath),
+        symbols,
+        count: symbols.length
+      };
+    }
+
+    if (mode === "definition") {
+      let symbol = String(symbolInput ?? "").trim();
+
+      if (!symbol && rawPath && Number.isFinite(Number(line))) {
+        const file = this.resolveWithinBase(rawPath);
+        const text = await fs.readFile(file, "utf8");
+        const lines = text.replace(/\r\n/g, "\n").split("\n");
+        const lineIndex = Math.max(0, Math.min(lines.length - 1, Math.round(Number(line) - 1)));
+        const targetLine = lines[lineIndex] ?? "";
+        const colIndex = Math.max(0, Math.min(targetLine.length, Math.round(Number(column || 1) - 1)));
+        const left = targetLine.slice(0, colIndex).match(/[A-Za-z_$][\w$]*$/)?.[0] ?? "";
+        const right = targetLine.slice(colIndex).match(/^[A-Za-z_$][\w$]*/)?.[0] ?? "";
+        symbol = `${left}${right}`.trim();
+      }
+
+      if (!symbol) {
+        throw new Error("symbol is required for action=definition");
+      }
+
+      const matches = await this.grepFiles({
+        pattern: `\\b${escapeRegExp(symbol)}\\b`,
+        path: ".",
+        recursive: true,
+        regex: true,
+        case_sensitive: true,
+        max_matches: maxResults
+      });
+
+      return {
+        ok: true,
+        action: mode,
+        provider: "builtin-lite",
+        symbol,
+        definitions: matches.matches,
+        count: matches.count,
+        truncated: matches.truncated
+      };
+    }
+
+    if (mode === "diagnostics") {
+      if (!rawPath || typeof rawPath !== "string") {
+        throw new Error("path is required for action=diagnostics");
+      }
+      const ext = path.extname(String(rawPath)).toLowerCase();
+      const diagnostics = [];
+
+      if (ext === ".json") {
+        const absolute = this.resolveWithinBase(rawPath);
+        try {
+          JSON.parse(await fs.readFile(absolute, "utf8"));
+        } catch (error) {
+          diagnostics.push({
+            severity: "error",
+            message: error.message
+          });
+        }
+      } else if ([".js", ".mjs", ".cjs"].includes(ext)) {
+        const check = await this.runNodeSyntaxCheck(rawPath);
+        if (!check.ok) {
+          diagnostics.push({
+            severity: "error",
+            message: check.message || "syntax check failed"
+          });
+        }
+      } else {
+        diagnostics.push({
+          severity: "info",
+          message: `diagnostics not implemented for extension '${ext || "unknown"}'`
+        });
+      }
+
+      return {
+        ok: true,
+        action: mode,
+        provider: "builtin-lite",
+        path: String(rawPath),
+        diagnostics,
+        count: diagnostics.length
+      };
+    }
+
+    throw new Error(`unsupported lsp action: ${mode}`);
+  }
+
+  async executeQuestion({ questions } = {}) {
+    if (!Array.isArray(questions) || questions.length === 0) {
+      throw new Error("questions must be a non-empty array");
+    }
+
+    const normalizedQuestions = questions.map((item, index) => ({
+      id: String(item?.id ?? `q_${index + 1}`).trim() || `q_${index + 1}`,
+      header: String(item?.header ?? "").trim(),
+      question: String(item?.question ?? "").trim(),
+      multiple: item?.multiple === true,
+      options: Array.isArray(item?.options)
+        ? item.options
+            .map((option) => ({
+              label: String(option?.label ?? "").trim(),
+              description: String(option?.description ?? "").trim()
+            }))
+            .filter((option) => option.label)
+        : []
+    }));
+
+    if (!this.questionHandler) {
+      return {
+        ok: false,
+        pending: true,
+        error: "question handler not configured",
+        questions: normalizedQuestions
+      };
+    }
+
+    const response = await this.questionHandler({
+      questions: normalizedQuestions
+    });
+
+    const answers =
+      Array.isArray(response?.answers) && response.answers.length
+        ? response.answers
+        : normalizedQuestions.map((item) => ({
+            id: item.id,
+            answers: []
+          }));
+
+    const summary = answers
+      .map((item) => {
+        const values = Array.isArray(item.answers) ? item.answers : [];
+        return `${item.id}=${values.join("|") || "(none)"}`;
+      })
+      .join(", ");
+
+    return {
+      ok: true,
+      questions: normalizedQuestions,
+      answers,
+      summary
+    };
+  }
+
+  async executeTodoWrite({ todos, merge = false, clear = false } = {}) {
+    if (clear) {
+      this.todoItems = [];
+      return {
+        ok: true,
+        count: 0,
+        todos: []
+      };
+    }
+
+    const normalized = Array.isArray(todos)
+      ? todos.map((item, index) => normalizeTodoItem(item, index)).filter(Boolean)
+      : [];
+
+    if (!merge) {
+      this.todoItems = normalized;
+    } else {
+      const next = new Map(this.todoItems.map((item) => [item.id, item]));
+      for (const item of normalized) {
+        next.set(item.id, item);
+      }
+      this.todoItems = [...next.values()];
+    }
+
+    return {
+      ok: true,
+      count: this.todoItems.length,
+      todos: this.todoItems
+    };
+  }
+
+  async executeTodoRead() {
+    return {
+      ok: true,
+      count: this.todoItems.length,
+      todos: this.todoItems
+    };
+  }
+
+  async executeSkill({ name, path: rawPath, query, max_lines } = {}) {
+    let targetPath = "";
+    if (typeof rawPath === "string" && rawPath.trim()) {
+      targetPath = this.resolveWithinBase(rawPath.trim());
+    } else {
+      const entries = await this.walkEntries(this.baseDir, true);
+      const skillFiles = entries.entries
+        .filter((entry) => entry.type === "file" && path.basename(entry.path).toLowerCase() === "skill.md")
+        .map((entry) => this.resolveWithinBase(entry.path));
+
+      if (skillFiles.length === 0) {
+        return {
+          ok: false,
+          error: "no SKILL.md files found in workspace"
+        };
+      }
+
+      if (typeof name === "string" && name.trim()) {
+        const needle = name.trim().toLowerCase();
+        const matched = skillFiles.find((filePath) => {
+          const dirName = path.basename(path.dirname(filePath)).toLowerCase();
+          return dirName.includes(needle) || toToolName(dirName) === toToolName(needle);
+        });
+        targetPath = matched ?? skillFiles[0];
+      } else {
+        targetPath = skillFiles[0];
+      }
+    }
+
+    const content = await fs.readFile(targetPath, "utf8");
+    const lines = content.replace(/\r\n/g, "\n").split("\n");
+    const maxLines = Number.isFinite(Number(max_lines)) ? Math.max(1, Math.min(2000, Number(max_lines))) : 200;
+    const excerptLines = lines.slice(0, maxLines);
+    const queryText = String(query ?? "").trim().toLowerCase();
+    const matched_lines = queryText
+      ? lines
+          .map((line, index) => ({ line: index + 1, text: line }))
+          .filter((item) => item.text.toLowerCase().includes(queryText))
+          .slice(0, 80)
+      : [];
+
+    return {
+      ok: true,
+      skill: {
+        name: path.basename(path.dirname(targetPath)),
+        path: path.relative(this.baseDir, targetPath)
+      },
+      lines: lines.length,
+      excerpt: excerptLines.join("\n"),
+      matched_lines
+    };
+  }
+
+  async executeTask({ prompt, max_tool_rounds } = {}) {
+    const text = String(prompt ?? "").trim();
+    if (!text) {
+      throw new Error("prompt is required");
+    }
+    if (!this.taskRunner) {
+      return {
+        ok: false,
+        error: "task runner is not configured"
+      };
+    }
+    const maxRounds = Number.isFinite(Number(max_tool_rounds)) ? Math.max(1, Math.min(10, Number(max_tool_rounds))) : 3;
+    return this.taskRunner({
+      prompt: text,
+      max_tool_rounds: maxRounds
+    });
+  }
+
+  async executeBatch({ calls, parallel = true, continue_on_error = true } = {}) {
+    if (!Array.isArray(calls) || calls.length === 0) {
+      throw new Error("calls must be a non-empty array");
+    }
+
+    const invoke = async (entry, index) => {
+      const name = String(entry?.name ?? entry?.tool ?? entry?.function?.name ?? "").trim();
+      if (!name) {
+        return {
+          index,
+          ok: false,
+          error: "call is missing tool name"
+        };
+      }
+      const rawArgs = entry?.arguments ?? entry?.input ?? entry?.function?.arguments ?? {};
+      const args =
+        typeof rawArgs === "string"
+          ? safeJsonParse(rawArgs)
+          : rawArgs && typeof rawArgs === "object"
+            ? rawArgs
+            : {};
+
+      try {
+        const result = await this.executeToolByName(name, args, {
+          disableTaskTool: true
+        });
+        return {
+          index,
+          ok: true,
+          name,
+          result
+        };
+      } catch (error) {
+        return {
+          index,
+          ok: false,
+          name,
+          error: error.message
+        };
+      }
+    };
+
+    let results = [];
+    if (parallel) {
+      results = await Promise.all(calls.map((entry, index) => invoke(entry, index)));
+    } else {
+      for (let i = 0; i < calls.length; i += 1) {
+        const result = await invoke(calls[i], i);
+        results.push(result);
+        if (!continue_on_error && !result.ok) {
+          break;
+        }
+      }
+    }
+
+    const failed = results.filter((item) => !item.ok).length;
+    return {
+      ok: failed === 0,
+      parallel: !!parallel,
+      continue_on_error: !!continue_on_error,
+      total: results.length,
+      failed,
+      succeeded: Math.max(0, results.length - failed),
+      results
+    };
+  }
+
+  async executePlanEnter({ goal, steps = [] } = {}) {
+    const resolvedGoal = String(goal ?? "").trim();
+    if (!resolvedGoal) {
+      throw new Error("goal is required");
+    }
+    const normalizedSteps = Array.isArray(steps) ? steps.map((item) => String(item ?? "").trim()).filter(Boolean) : [];
+    this.planState = {
+      active: true,
+      goal: resolvedGoal,
+      steps: normalizedSteps,
+      entered_at: new Date().toISOString(),
+      exited_at: null,
+      summary: ""
+    };
+    return {
+      ok: true,
+      active: true,
+      goal: resolvedGoal,
+      steps: normalizedSteps
+    };
+  }
+
+  async executePlanExit({ summary = "" } = {}) {
+    this.planState = {
+      ...this.planState,
+      active: false,
+      exited_at: new Date().toISOString(),
+      summary: String(summary ?? "").trim()
+    };
+    return {
+      ok: true,
+      active: false,
+      goal: this.planState.goal,
+      summary: this.planState.summary
+    };
+  }
+
+  normalizeToolName(name) {
+    const raw = String(name ?? "").trim();
+    const aliasMap = {
+      ls: "list_files",
+      glob: "glob_files",
+      grep: "grep_files",
+      read: "read_file",
+      write: "write_file",
+      edit: "edit_file",
+      bash: "execute_shell",
+      websearch: "search_web"
+    };
+    return aliasMap[raw] ?? raw;
+  }
+
+  async executeCustomTool(name, args) {
+    await this.ensureCustomToolsLoaded();
+    const normalized = this.normalizeToolName(name);
+    const tool = this.customTools.get(normalized);
+    if (!tool) {
+      throw new Error(`Unsupported tool: ${name}`);
+    }
+
+    const ctx = {
+      base_dir: this.baseDir,
+      resolve_path: (value) => this.resolveWithinBase(value),
+      tools: {
+        execute: async (toolName, toolArgs = {}) => this.executeToolByName(toolName, toolArgs)
+      }
+    };
+
+    const output = await tool.execute(args ?? {}, ctx);
+    if (output && typeof output === "object") {
+      return output;
+    }
+    return {
+      ok: true,
+      output: String(output ?? "")
+    };
+  }
+
+  async executeToolByName(name, args = {}, options = {}) {
+    const normalizedName = this.normalizeToolName(name);
+
+    switch (normalizedName) {
       case "list_files":
         return this.listFiles(args);
       case "glob_files":
@@ -1580,8 +2830,58 @@ export class LocalFileTools {
         return this.searchWeb(args);
       case "execute_shell":
         return this.executeShell(args);
+      case "webfetch":
+        return this.executeWebFetch(args);
+      case "codesearch":
+        return this.executeCodeSearch(args);
+      case "lsp":
+        return this.executeLsp(args);
+      case "question":
+        return this.executeQuestion(args);
+      case "todowrite":
+        return this.executeTodoWrite(args);
+      case "todoread":
+        return this.executeTodoRead(args);
+      case "skill":
+        return this.executeSkill(args);
+      case "batch":
+        return this.executeBatch(args);
+      case "task":
+        if (options?.disableTaskTool) {
+          return {
+            ok: false,
+            blocked: true,
+            blocked_reason: "task tool disabled in current execution scope"
+          };
+        }
+        return this.executeTask(args);
+      case "plan_enter":
+        if (options?.disablePlanTools) {
+          return {
+            ok: false,
+            blocked: true,
+            blocked_reason: "plan tools disabled in current execution scope"
+          };
+        }
+        return this.executePlanEnter(args);
+      case "plan_exit":
+        if (options?.disablePlanTools) {
+          return {
+            ok: false,
+            blocked: true,
+            blocked_reason: "plan tools disabled in current execution scope"
+          };
+        }
+        return this.executePlanExit(args);
       default:
-        throw new Error(`Unsupported tool: ${name}`);
+        return this.executeCustomTool(normalizedName, args);
     }
+  }
+
+  async executeToolCall(call, options = {}) {
+    const fn = call?.function;
+    const name = fn?.name;
+    const args = safeJsonParse(fn?.arguments);
+    return this.executeToolByName(name, args, options);
   }
 }

@@ -262,6 +262,10 @@ export class StarcodeAgent {
     this.sessionSummaryKeepRecent = sessionSummaryKeepRecent;
     this.sessionSummary = "";
     this.messages = [{ role: "system", content: systemPrompt }];
+
+    if (this.localTools?.setTaskRunner instanceof Function) {
+      this.localTools.setTaskRunner((input) => this.runDelegatedTask(input));
+    }
   }
 
   exportSessionState() {
@@ -340,6 +344,178 @@ export class StarcodeAgent {
       history_messages: stableHistory.length,
       compressed_messages: older.length,
       summary_lines: boundedSummary ? boundedSummary.split("\n").length : 0
+    };
+  }
+
+  async runDelegatedTask({ prompt, max_tool_rounds = 3 } = {}) {
+    const delegatedPrompt = String(prompt ?? "").trim();
+    if (!delegatedPrompt) {
+      throw new Error("task prompt is required");
+    }
+
+    const maxRounds = Number.isFinite(Number(max_tool_rounds))
+      ? Math.max(1, Math.min(10, Math.round(Number(max_tool_rounds))))
+      : 3;
+    const toolCalls = [];
+    const toolResults = [];
+    const taskMessages = [
+      {
+        role: "system",
+        content: String(this.messages?.[0]?.content ?? "You are Starcode, an enterprise coding agent.")
+      },
+      {
+        role: "system",
+        content:
+          "You are running a delegated sub-task. Focus on the requested sub-task only, use tools when needed, and return a concise final result."
+      },
+      {
+        role: "user",
+        content: delegatedPrompt
+      }
+    ];
+
+    const rawLocalTools = await Promise.resolve(
+      this.localTools?.getToolDefinitions?.({
+        includeTaskTool: false,
+        includePlanTools: false
+      }) ?? []
+    );
+    const tools = applyToolSchemaVersion([...rawLocalTools], this.toolSchemaVersion);
+
+    for (let round = 0; round <= maxRounds; round += 1) {
+      const result = await this.provider.complete({
+        model: this.model,
+        messages: taskMessages,
+        temperature: this.temperature,
+        topP: this.topP,
+        maxTokens: this.maxTokens,
+        tools,
+        stream: false
+      });
+
+      if (!result.toolCalls?.length || !this.localTools) {
+        return {
+          ok: true,
+          prompt: delegatedPrompt,
+          output_text: normalizeContent(result?.message?.content ?? result?.outputText),
+          finish_reason: result.finishReason ?? "stop",
+          tool_calls: toolCalls,
+          tool_results: toolResults,
+          rounds: round
+        };
+      }
+
+      if (round === maxRounds) {
+        return {
+          ok: false,
+          prompt: delegatedPrompt,
+          error: "subtask max tool rounds reached",
+          output_text: normalizeContent(result?.message?.content ?? result?.outputText),
+          finish_reason: "max_tool_rounds",
+          tool_calls: toolCalls,
+          tool_results: toolResults,
+          rounds: round
+        };
+      }
+
+      taskMessages.push(buildAssistantMessageFromResult(result, true));
+      toolCalls.push(...result.toolCalls);
+
+      for (const call of result.toolCalls) {
+        const toolName = call?.function?.name ?? "unknown";
+        const parsedArguments = parseToolArguments(call?.function?.arguments);
+        const toolCallId = call?.id ?? `task_tool_${randomUUID()}`;
+
+        if (toolName === "task") {
+          const blocked = {
+            ok: false,
+            blocked: true,
+            blocked_reason: "nested task delegation is disabled"
+          };
+          toolResults.push({
+            tool_call_id: toolCallId,
+            name: toolName,
+            arguments: parsedArguments,
+            ok: false,
+            result: blocked
+          });
+          pushToolMessage(taskMessages, toolCallId, blocked);
+          continue;
+        }
+
+        let permissionDecision = null;
+        if (this.permissionManager) {
+          permissionDecision = await this.permissionManager.authorizeToolCall(call, {
+            traceId: randomUUID(),
+            round,
+            toolCallId
+          });
+        }
+
+        if (permissionDecision && !permissionDecision.allowed) {
+          const deniedPayload = {
+            ok: false,
+            denied: true,
+            error: "permission denied",
+            permission: {
+              decision: permissionDecision.decision,
+              source: permissionDecision.source,
+              mode: permissionDecision.mode,
+              reason: permissionDecision.reason ?? null
+            }
+          };
+          toolResults.push({
+            tool_call_id: toolCallId,
+            name: toolName,
+            arguments: parsedArguments,
+            ok: false,
+            denied: true,
+            permission: deniedPayload.permission
+          });
+          pushToolMessage(taskMessages, toolCallId, deniedPayload);
+          continue;
+        }
+
+        try {
+          const toolResult = await this.localTools.executeToolCall(
+            {
+              ...call,
+              id: toolCallId
+            },
+            {
+              disableTaskTool: true,
+              disablePlanTools: true
+            }
+          );
+          toolResults.push({
+            tool_call_id: toolCallId,
+            name: toolName,
+            arguments: parsedArguments,
+            ok: true,
+            result: toolResult
+          });
+          pushToolMessage(taskMessages, toolCallId, toolResult);
+        } catch (error) {
+          const failedPayload = {
+            ok: false,
+            error: error.message
+          };
+          toolResults.push({
+            tool_call_id: toolCallId,
+            name: toolName,
+            arguments: parsedArguments,
+            ok: false,
+            error: error.message
+          });
+          pushToolMessage(taskMessages, toolCallId, failedPayload);
+        }
+      }
+    }
+
+    return {
+      ok: false,
+      prompt: delegatedPrompt,
+      error: "subtask aborted"
     };
   }
 
@@ -492,7 +668,7 @@ export class StarcodeAgent {
     };
 
     try {
-      const rawLocalTools = this.localTools?.getToolDefinitions?.() ?? [];
+      const rawLocalTools = await Promise.resolve(this.localTools?.getToolDefinitions?.() ?? []);
       const rawMcpTools = mcpSnapshot?.toolDefinitions ?? [];
       const tools = applyToolSchemaVersion([...rawLocalTools, ...rawMcpTools], this.toolSchemaVersion);
 
