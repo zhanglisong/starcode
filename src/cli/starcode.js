@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import readline from "node:readline/promises";
-import { clearLine, cursorTo, moveCursor } from "node:readline";
+import { clearLine, cursorTo, emitKeypressEvents, moveCursor } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
 import { TelemetryClient } from "../telemetry/telemetryClient.js";
 import { OpenAICompatibleProvider, MockProvider } from "../providers/openAICompatibleProvider.js";
@@ -238,13 +238,21 @@ function truncateInlineJson(value, max = 220) {
   return `${text.slice(0, Math.max(0, max - 1))}…`;
 }
 
+function formatRoundWindow(maxRounds) {
+  const parsed = Number(maxRounds);
+  if (!Number.isFinite(parsed)) {
+    return "unbounded";
+  }
+  return String(Math.max(1, Math.round(parsed)) + 1);
+}
+
 function renderRoundEvent(event) {
   if (!event || typeof event !== "object") {
     return "";
   }
 
   if (event.stage === "start") {
-    return `round> ${event.round + 1}/${(event.max_rounds ?? 0) + 1} started`;
+    return `round> ${event.round + 1}/${formatRoundWindow(event.max_rounds)} started`;
   }
 
   if (event.stage === "model_response") {
@@ -256,7 +264,7 @@ function renderRoundEvent(event) {
   }
 
   if (event.stage === "limit_reached") {
-    return `round> tool-call round limit reached at ${event.round + 1}/${(event.max_rounds ?? 0) + 1}`;
+    return `round> tool-call round limit reached at ${event.round + 1}/${formatRoundWindow(event.max_rounds)}`;
   }
 
   return "";
@@ -333,6 +341,29 @@ function clampNumber(value, fallback = 0, min = 0) {
     return fallback;
   }
   return Math.max(min, parsed);
+}
+
+function parseMaxToolRounds(value, fallback = Infinity) {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) {
+      return fallback;
+    }
+    if (normalized === "infinity" || normalized === "inf" || normalized === "unlimited") {
+      return Infinity;
+    }
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.max(1, Math.round(parsed));
 }
 
 function formatPercent(value) {
@@ -499,18 +530,98 @@ async function promptPermissionDecision({ rl, uiMode, request, matched }) {
     output.write(`permission> matched deny rule ${denyRule.rule.permission}:${denyRule.rule.pattern} (${denyRule.rule.source})\n`);
   }
 
-  const answer = String(
-    (await rl.question("permission> allow once/always/reject? [once]: ")) ?? ""
-  )
-    .trim()
-    .toLowerCase();
+  const selectPermissionChoiceWithArrows = async () => {
+    const canUseArrowSelector = Boolean(input.isTTY && output.isTTY && typeof input.setRawMode === "function");
+    if (!canUseArrowSelector) {
+      return null;
+    }
 
-  if (!answer || answer === "once" || answer === "o" || answer === "1") {
-    return { reply: "once" };
+    const options = ["once", "always", "reject"];
+    let selectedIndex = 1;
+
+    const optionsLine = `permission> options: ${options.join(" | ")}`;
+    output.write(uiMode === UI_MODES.TUI ? `${prefixLines(optionsLine)}\n` : `${optionsLine}\n`);
+
+    const renderSelectedLine = () => {
+      const selected = options[selectedIndex];
+      const line = `permission> selected: ${selected} (up/down to choose, enter to confirm)`;
+      clearLine(output, 0);
+      cursorTo(output, 0);
+      output.write(uiMode === UI_MODES.TUI ? prefixLines(line) : line);
+    };
+
+    const previousRawMode = input.isRaw === true;
+    if (typeof rl.pause === "function") {
+      rl.pause();
+    }
+    emitKeypressEvents(input);
+
+    try {
+      input.setRawMode(true);
+      input.resume();
+    } catch {
+      if (typeof rl.resume === "function") {
+        rl.resume();
+      }
+      return null;
+    }
+
+    renderSelectedLine();
+
+    try {
+      return await new Promise((resolve) => {
+        const finish = (value) => {
+          input.removeListener("keypress", onKeypress);
+          resolve(value);
+        };
+
+        const onKeypress = (_str, key = {}) => {
+          if (key.ctrl && key.name === "c") {
+            finish("reject");
+            return;
+          }
+
+          if (key.name === "up") {
+            selectedIndex = (selectedIndex - 1 + options.length) % options.length;
+            renderSelectedLine();
+            return;
+          }
+
+          if (key.name === "down") {
+            selectedIndex = (selectedIndex + 1) % options.length;
+            renderSelectedLine();
+            return;
+          }
+
+          if (key.name === "return" || key.name === "enter") {
+            finish(options[selectedIndex]);
+          }
+        };
+
+        input.on("keypress", onKeypress);
+      });
+    } finally {
+      input.setRawMode(previousRawMode);
+      output.write("\n");
+      if (typeof rl.resume === "function") {
+        rl.resume();
+      }
+    }
+  };
+
+  const selectedByArrow = await selectPermissionChoiceWithArrows();
+  const answer = selectedByArrow
+    ? String(selectedByArrow).trim().toLowerCase()
+    : String((await rl.question("permission> allow once/always/reject? [always]: ")) ?? "")
+        .trim()
+        .toLowerCase();
+
+  if (!answer || answer === "always" || answer === "a" || answer === "2") {
+    return { reply: "always" };
   }
 
-  if (answer === "always" || answer === "a" || answer === "2") {
-    return { reply: "always" };
+  if (answer === "once" || answer === "o" || answer === "1") {
+    return { reply: "once" };
   }
 
   let message = "";
@@ -700,6 +811,7 @@ async function main() {
   const enableStreaming = process.env.STARCODE_ENABLE_STREAMING !== "false";
   const enablePlanningMode = process.env.STARCODE_ENABLE_PLANNING_MODE === "true";
   const enableSessionSummary = process.env.STARCODE_ENABLE_SESSION_SUMMARY !== "false";
+  const maxToolRounds = parseMaxToolRounds(process.env.STARCODE_MAX_TOOL_ROUNDS, Infinity);
   const promptVersion = resolvePromptVersion();
   const toolSchemaVersion = String(process.env.STARCODE_TOOL_SCHEMA_VERSION ?? "v1").toLowerCase();
   const sessionSummaryTriggerMessages = Number(process.env.STARCODE_SESSION_SUMMARY_TRIGGER_MESSAGES ?? 18);
@@ -803,6 +915,7 @@ async function main() {
     temperature: Number(process.env.MODEL_TEMPERATURE ?? 0.2),
     topP: Number(process.env.MODEL_TOP_P ?? 1),
     maxTokens: Number(process.env.MODEL_MAX_TOKENS ?? 1024),
+    maxToolRounds,
     enableStreaming,
     enablePlanningMode,
     enableSessionSummary,

@@ -93,6 +93,29 @@ function clampNumber(value, fallback, min, max) {
   return Math.max(min, Math.min(max, Math.round(parsed)));
 }
 
+function parseMaxToolRounds(value, fallback = Infinity) {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) {
+      return fallback;
+    }
+    if (normalized === "infinity" || normalized === "inf" || normalized === "unlimited") {
+      return Infinity;
+    }
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.max(1, Math.round(parsed));
+}
+
 function appendBufferChunk(state, chunk, maxBytes) {
   if (!Buffer.isBuffer(chunk)) {
     return;
@@ -2644,7 +2667,7 @@ export class LocalFileTools {
         error: "task runner is not configured"
       };
     }
-    const maxRounds = Number.isFinite(Number(max_tool_rounds)) ? Math.max(1, Math.min(10, Number(max_tool_rounds))) : 3;
+    const maxRounds = parseMaxToolRounds(max_tool_rounds, Infinity);
     return this.taskRunner({
       prompt: text,
       max_tool_rounds: maxRounds

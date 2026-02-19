@@ -159,6 +159,55 @@ class MultiRoundProvider {
   }
 }
 
+class LongRoundProvider {
+  constructor(rounds = 6) {
+    this.providerName = "long-round";
+    this.calls = 0;
+    this.rounds = rounds;
+  }
+
+  async complete() {
+    this.calls += 1;
+
+    if (this.calls <= this.rounds) {
+      return {
+        outputText: "",
+        message: {
+          role: "assistant",
+          content: ""
+        },
+        finishReason: "tool_calls",
+        toolCalls: [
+          {
+            id: `long_chain_${this.calls}`,
+            type: "function",
+            function: {
+              name: "write_file",
+              arguments: JSON.stringify({
+                path: "long-chain.txt",
+                content: String(this.calls),
+                append: true
+              })
+            }
+          }
+        ],
+        usage: { total_tokens: this.calls * 10 }
+      };
+    }
+
+    return {
+      outputText: "Long chain complete.",
+      message: {
+        role: "assistant",
+        content: "Long chain complete."
+      },
+      finishReason: "stop",
+      toolCalls: [],
+      usage: { total_tokens: (this.rounds + 1) * 10 }
+    };
+  }
+}
+
 class MaxRoundProvider {
   constructor() {
     this.providerName = "max-round";
@@ -589,6 +638,27 @@ test("agent supports 3+ tool rounds before final answer", async () => {
 
   const file = await fs.readFile(path.join(dir, "chain.txt"), "utf8");
   assert.equal(file, "abc");
+});
+
+test("agent defaults to unbounded tool rounds", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "starcode-agent-unbounded-"));
+  const provider = new LongRoundProvider(6);
+  const tools = new LocalFileTools({ baseDir: dir });
+
+  const agent = new StarcodeAgent({
+    provider,
+    telemetry: telemetryStub(),
+    localTools: tools,
+    model: "stub-model",
+    systemPrompt: "You are a test agent."
+  });
+
+  const result = await agent.runTurn("run long chain");
+  assert.equal(result.outputText, "Long chain complete.");
+  assert.equal(provider.calls, 7);
+
+  const file = await fs.readFile(path.join(dir, "long-chain.txt"), "utf8");
+  assert.equal(file, "123456");
 });
 
 test("agent stops on max tool rounds without executing extra calls", async () => {

@@ -11,6 +11,16 @@ This implementation captures:
 
 It supports company-wide aggregation across many engineers and exports post-training datasets.
 
+## Start with kimi-k2.5
+
+```bash
+MODEL_PROVIDER=moonshot \
+MODEL_ENDPOINT=https://api.moonshot.ai/v1/chat/completions \
+MODEL_NAME=kimi-k2.5 \
+MODEL_API_KEY=$KIMI_API_KEY \
+node /Users/huizhang/code/starcode/src/cli/starcode.js
+```
+
 ## Architecture
 
 1. Agent CLI (`/Users/huizhang/code/starcode/src/cli/starcode.js`)
@@ -128,6 +138,8 @@ Tool workspace boundary:
 - Session memory summary is enabled by default (`STARCODE_ENABLE_SESSION_SUMMARY=true`).
   - Older turns are auto-summarized after `STARCODE_SESSION_SUMMARY_TRIGGER_MESSAGES`.
   - Recent turns kept verbatim: `STARCODE_SESSION_SUMMARY_KEEP_RECENT`.
+- Tool-call round limit is unbounded by default.
+  - Set `STARCODE_MAX_TOOL_ROUNDS` to a positive integer to enforce a hard cap.
 
 Model I/O step tracing:
 - Set `STARCODE_DEBUG_MODEL_IO=1` to record loop-level agent <> model messages and tool execution steps.

@@ -40,6 +40,29 @@ function parseRegexCsv(input) {
   });
 }
 
+function parseMaxToolRounds(value, fallback = Infinity) {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) {
+      return fallback;
+    }
+    if (normalized === "infinity" || normalized === "inf" || normalized === "unlimited") {
+      return Infinity;
+    }
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.max(1, Math.round(parsed));
+}
+
 class EvalTelemetry {
   constructor() {
     this.turnByTraceId = new Map();
@@ -337,7 +360,7 @@ async function main() {
       temperature: Number(process.env.MODEL_TEMPERATURE ?? 0.2),
       topP: Number(process.env.MODEL_TOP_P ?? 1),
       maxTokens: Number(process.env.MODEL_MAX_TOKENS ?? 1024),
-      maxToolRounds: Number(process.env.STARCODE_MAX_TOOL_ROUNDS ?? 5),
+      maxToolRounds: parseMaxToolRounds(process.env.STARCODE_MAX_TOOL_ROUNDS, Infinity),
       ...defaults,
       ...agentOverrides,
       enableStreaming: runOptions.stream === true ? true : (agentOverrides.enableStreaming ?? defaults.enableStreaming),

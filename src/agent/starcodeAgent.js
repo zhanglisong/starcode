@@ -234,6 +234,29 @@ function emitCallback(handler, payload) {
   }
 }
 
+function parseMaxToolRounds(value, fallback = Infinity) {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) {
+      return fallback;
+    }
+    if (normalized === "infinity" || normalized === "inf" || normalized === "unlimited") {
+      return Infinity;
+    }
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.max(1, Math.round(parsed));
+}
+
 function applyToolSchemaVersion(tools, version) {
   const schemaVersion = String(version ?? "v1");
   if (schemaVersion === "v1") {
@@ -273,7 +296,7 @@ export class StarcodeAgent {
     temperature = 0.2,
     topP = 1,
     maxTokens = 1024,
-    maxToolRounds = 5,
+    maxToolRounds = Infinity,
     enableStreaming = false,
     enablePlanningMode = false,
     enableSessionSummary = false,
@@ -293,7 +316,7 @@ export class StarcodeAgent {
     this.temperature = temperature;
     this.topP = topP;
     this.maxTokens = maxTokens;
-    this.maxToolRounds = maxToolRounds;
+    this.maxToolRounds = parseMaxToolRounds(maxToolRounds, Infinity);
     this.enableStreaming = enableStreaming;
     this.enablePlanningMode = enablePlanningMode;
     this.enableSessionSummary = enableSessionSummary;
@@ -386,15 +409,13 @@ export class StarcodeAgent {
     };
   }
 
-  async runDelegatedTask({ prompt, max_tool_rounds = 3 } = {}) {
+  async runDelegatedTask({ prompt, max_tool_rounds = Infinity } = {}) {
     const delegatedPrompt = String(prompt ?? "").trim();
     if (!delegatedPrompt) {
       throw new Error("task prompt is required");
     }
 
-    const maxRounds = Number.isFinite(Number(max_tool_rounds))
-      ? Math.max(1, Math.min(10, Math.round(Number(max_tool_rounds))))
-      : 3;
+    const maxRounds = parseMaxToolRounds(max_tool_rounds, Infinity);
     const toolCalls = [];
     const toolResults = [];
     const taskMessages = [
