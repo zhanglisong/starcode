@@ -718,6 +718,38 @@ test("agent emits streamed text deltas when streaming is enabled", async () => {
   assert.deepEqual(provider.calls, ["stream"]);
 });
 
+test("agent emits round and tool callbacks during tool-call loop", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "starcode-agent-callbacks-"));
+  const tools = new LocalFileTools({ baseDir: dir });
+  const provider = new StubProvider();
+  const roundEvents = [];
+  const toolStarts = [];
+  const toolResults = [];
+
+  const agent = new StarcodeAgent({
+    provider,
+    telemetry: telemetryStub(),
+    localTools: tools,
+    model: "stub-model",
+    systemPrompt: "You are a test agent."
+  });
+
+  const result = await agent.runTurn("please create a file", {
+    onRound: (event) => roundEvents.push(event),
+    onToolStart: (event) => toolStarts.push(event),
+    onToolResult: (event) => toolResults.push(event)
+  });
+
+  assert.equal(result.outputText, "Created file successfully.");
+  assert.equal(roundEvents.some((event) => event.stage === "start" && event.round === 0), true);
+  assert.equal(roundEvents.some((event) => event.stage === "model_response" && event.round === 0), true);
+  assert.equal(toolStarts.length >= 1, true);
+  assert.equal(toolStarts[0].name, "write_file");
+  assert.equal(toolResults.length >= 1, true);
+  assert.equal(toolResults[0].name, "write_file");
+  assert.equal(toolResults[0].ok, true);
+});
+
 test("agent falls back to non-streaming mode when provider stream is unsupported", async () => {
   const provider = new StreamFallbackProvider();
   const modelIoLogger = modelIoLoggerStub();

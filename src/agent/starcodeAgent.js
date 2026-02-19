@@ -195,6 +195,17 @@ function planToSystemPrompt(plan) {
   ].join("\n");
 }
 
+function emitCallback(handler, payload) {
+  if (typeof handler !== "function") {
+    return;
+  }
+  try {
+    handler(payload);
+  } catch {
+    // Best-effort runtime hook; callback errors must not break agent execution.
+  }
+}
+
 function applyToolSchemaVersion(tools, version) {
   const schemaVersion = String(version ?? "v1");
   if (schemaVersion === "v1") {
@@ -626,6 +637,9 @@ export class StarcodeAgent {
     const startedAt = Date.now();
     const streamRequested = this.enableStreaming && options?.stream === true;
     const onTextDelta = typeof options?.onTextDelta === "function" ? options.onTextDelta : null;
+    const onRound = typeof options?.onRound === "function" ? options.onRound : null;
+    const onToolStart = typeof options?.onToolStart === "function" ? options.onToolStart : null;
+    const onToolResult = typeof options?.onToolResult === "function" ? options.onToolResult : null;
     const allToolCalls = [];
     const allToolResults = [];
     let latestUsage = {};
@@ -673,6 +687,12 @@ export class StarcodeAgent {
       const tools = applyToolSchemaVersion([...rawLocalTools, ...rawMcpTools], this.toolSchemaVersion);
 
       for (let round = 0; round <= this.maxToolRounds; round += 1) {
+        emitCallback(onRound, {
+          stage: "start",
+          round,
+          max_rounds: this.maxToolRounds
+        });
+
         await this.logModelIo({
           phase: "model_request",
           trace_id: traceId,
@@ -750,6 +770,13 @@ export class StarcodeAgent {
           model_latency_ms: Date.now() - modelStartedAt
         });
 
+        emitCallback(onRound, {
+          stage: "model_response",
+          round,
+          finish_reason: result.finishReason ?? "unknown",
+          tool_calls: Array.isArray(result.toolCalls) ? result.toolCalls.length : 0
+        });
+
         if (!result.toolCalls?.length || (!this.localTools && !this.mcpManager)) {
           const assistantMessage = buildAssistantMessageFromResult(result, false);
           finalAssistantText = assistantMessage.content || "No response text returned.";
@@ -766,6 +793,11 @@ export class StarcodeAgent {
           latestFinishReason = "max_tool_rounds";
           finalAssistantText = "Tool-call round limit reached before final response.";
           turnMessages.push({ role: "assistant", content: finalAssistantText });
+          emitCallback(onRound, {
+            stage: "limit_reached",
+            round,
+            max_rounds: this.maxToolRounds
+          });
           break;
         }
 
@@ -785,6 +817,13 @@ export class StarcodeAgent {
           await this.logModelIo({
             phase: "tool_start",
             trace_id: traceId,
+            round,
+            tool_call_id: toolCallId,
+            name: toolName,
+            arguments: parsedArguments
+          });
+
+          emitCallback(onToolStart, {
             round,
             tool_call_id: toolCallId,
             name: toolName,
@@ -823,6 +862,16 @@ export class StarcodeAgent {
               reused: true,
               duplicate_of: cached.tool_call_id,
               ...(cached.meta ?? {})
+            });
+
+            emitCallback(onToolResult, {
+              round,
+              tool_call_id: toolCallId,
+              name: toolName,
+              ok: cached.ok,
+              error: cached.error ?? null,
+              reused: true,
+              duplicate_of: cached.tool_call_id
             });
 
             pushToolMessage(turnMessages, toolCallId, cached.tool_payload);
@@ -909,6 +958,16 @@ export class StarcodeAgent {
               permission: toolPayload.permission
             });
 
+            emitCallback(onToolResult, {
+              round,
+              tool_call_id: toolCallId,
+              name: toolName,
+              ok: false,
+              denied: true,
+              error: "permission denied",
+              permission: toolPayload.permission
+            });
+
             if (call?.id) {
               executedById.set(call.id, payload);
             }
@@ -989,6 +1048,23 @@ export class StarcodeAgent {
               ...(toolMeta ?? {})
             });
 
+            emitCallback(onToolResult, {
+              round,
+              tool_call_id: toolCallId,
+              name: toolName,
+              ok: true,
+              error: null,
+              permission: permissionDecision
+                ? {
+                    decision: permissionDecision.decision,
+                    source: permissionDecision.source,
+                    mode: permissionDecision.mode,
+                    reason: permissionDecision.reason ?? null
+                  }
+                : null,
+              ...(toolMeta ?? {})
+            });
+
             if (call?.id) {
               executedById.set(call.id, payload);
             }
@@ -1055,6 +1131,23 @@ export class StarcodeAgent {
                     mode: permissionDecision.mode,
                     reason: permissionDecision.reason ?? null,
                     prompt_decision: permissionDecision.prompt_decision ?? null
+                  }
+                : null,
+              ...(payload.meta ?? {})
+            });
+
+            emitCallback(onToolResult, {
+              round,
+              tool_call_id: toolCallId,
+              name: toolName,
+              ok: false,
+              error: error.message,
+              permission: permissionDecision
+                ? {
+                    decision: permissionDecision.decision,
+                    source: permissionDecision.source,
+                    mode: permissionDecision.mode,
+                    reason: permissionDecision.reason ?? null
                   }
                 : null,
               ...(payload.meta ?? {})

@@ -225,6 +225,56 @@ function renderTuiHistoricalInputRow({ inputText, ansiEnabled }) {
   return `\r \r${row}\n\n`;
 }
 
+function truncateInlineJson(value, max = 220) {
+  let text = "";
+  try {
+    text = typeof value === "string" ? value : JSON.stringify(value ?? {});
+  } catch {
+    text = String(value ?? "");
+  }
+  if (text.length <= max) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, max - 1))}…`;
+}
+
+function renderRoundEvent(event) {
+  if (!event || typeof event !== "object") {
+    return "";
+  }
+
+  if (event.stage === "start") {
+    return `round> ${event.round + 1}/${(event.max_rounds ?? 0) + 1} started`;
+  }
+
+  if (event.stage === "model_response") {
+    return `round> ${event.round + 1} model finish=${event.finish_reason ?? "unknown"} tool_calls=${event.tool_calls ?? 0}`;
+  }
+
+  if (event.stage === "limit_reached") {
+    return `round> tool-call round limit reached at ${event.round + 1}/${(event.max_rounds ?? 0) + 1}`;
+  }
+
+  return "";
+}
+
+function renderToolStartEvent(event) {
+  if (!event || typeof event !== "object") {
+    return "";
+  }
+  return `tool> start ${event.name ?? "unknown"} args=${truncateInlineJson(event.arguments)}`;
+}
+
+function renderToolResultEvent(event) {
+  if (!event || typeof event !== "object") {
+    return "";
+  }
+  const status = event.ok ? "ok" : event.denied ? "denied" : "error";
+  const suffix = event.error ? ` error=${event.error}` : "";
+  const reused = event.reused ? " reused=true" : "";
+  return `tool> result ${event.name ?? "unknown"} status=${status}${reused}${suffix}`;
+}
+
 async function nextLine(rl, promptLabel = "you> ") {
   try {
     return await rl.question(promptLabel);
@@ -901,6 +951,27 @@ async function main() {
           }
           streamedText += chunk;
           output.write(uiMode === UI_MODES.TUI ? chunk.replace(/\n/g, "\n| ") : chunk);
+        },
+        onRound: (event) => {
+          const line = renderRoundEvent(event);
+          if (!line) {
+            return;
+          }
+          output.write(uiMode === UI_MODES.TUI ? `${prefixLines(line)}\n` : `${line}\n`);
+        },
+        onToolStart: (event) => {
+          const line = renderToolStartEvent(event);
+          if (!line) {
+            return;
+          }
+          output.write(uiMode === UI_MODES.TUI ? `${prefixLines(line)}\n` : `${line}\n`);
+        },
+        onToolResult: (event) => {
+          const line = renderToolResultEvent(event);
+          if (!line) {
+            return;
+          }
+          output.write(uiMode === UI_MODES.TUI ? `${prefixLines(line)}\n` : `${line}\n`);
         }
       });
 
