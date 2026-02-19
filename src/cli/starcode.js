@@ -108,7 +108,7 @@ function resolveUiMode(value) {
 
 function parseInteractiveCliFlags(args) {
   const remainingArgs = [];
-  let uiMode = resolveUiMode(process.env.STARCODE_UI ?? UI_MODES.PLAIN);
+  let uiMode = resolveUiMode(process.env.STARCODE_UI ?? UI_MODES.TUI);
   let sessionId = String(process.env.STARCODE_SESSION_ID ?? "").trim();
   let forkSessionId = "";
 
