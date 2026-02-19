@@ -104,6 +104,78 @@ function renderPlan(plan) {
   return lines.join("\n");
 }
 
+function formatTokens(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return "0";
+  }
+  return Math.round(parsed).toLocaleString("en-US");
+}
+
+function formatMs(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return "0ms";
+  }
+  if (parsed < 1000) {
+    return `${Math.round(parsed)}ms`;
+  }
+  return `${(parsed / 1000).toFixed(2)}s`;
+}
+
+function renderStartupPanel({
+  providerName,
+  model,
+  workspaceDir,
+  enableStreaming,
+  enablePlanningMode,
+  enableSessionSummary,
+  mcpServerCount,
+  promptVersion,
+  toolSchemaVersion,
+  modelIoDebugEnabled,
+  modelIoFilePath
+}) {
+  const modelLabel = model && String(model).trim() ? String(model).trim() : "(unset)";
+  const providerLabel = providerName && String(providerName).trim() ? String(providerName).trim() : "(unset)";
+  const lines = [
+    "┌─────────────────────────────── Starcode ───────────────────────────────┐",
+    `│ model=${modelLabel} provider=${providerLabel} streaming=${enableStreaming ? "on" : "off"} planning=${enablePlanningMode ? "on" : "off"} │`,
+    `│ workspace=${workspaceDir} │`,
+    `│ mcp_servers=${mcpServerCount} session_summary=${enableSessionSummary ? "on" : "off"} prompt=${promptVersion} tools=${toolSchemaVersion} │`
+  ];
+
+  if (modelIoDebugEnabled) {
+    lines.push(`│ model_io_debug=on file=${modelIoFilePath} │`);
+  }
+
+  lines.push("└──────────────────────────────────────────────────────────────────────────┘");
+  lines.push("Use /help for workflow commands (/fix, /test, /explain, /commit). Type 'exit' to quit.");
+  return `${lines.join("\n")}\n`;
+}
+
+function renderTurnStats({
+  model,
+  usage,
+  latencyMs,
+  latencyBreakdown,
+  traceId,
+  flushed,
+  cumulativeTokens
+}) {
+  const modelLabel = model && String(model).trim() ? String(model).trim() : "(unset)";
+  const promptTokens = Number(usage?.prompt_tokens ?? 0);
+  const completionTokens = Number(usage?.completion_tokens ?? 0);
+  const totalTokens = Number(usage?.total_tokens ?? promptTokens + completionTokens);
+  const breakdown = latencyBreakdown ?? {};
+
+  return [
+    "stats>",
+    `model=${modelLabel} tokens(prompt/completion/total)=${formatTokens(promptTokens)}/${formatTokens(completionTokens)}/${formatTokens(totalTokens)} cumulative_total=${formatTokens(cumulativeTokens)}`,
+    `latency(total/model/tool/other)=${formatMs(latencyMs)}/${formatMs(breakdown.model_ms)}/${formatMs(breakdown.tool_ms)}/${formatMs(breakdown.other_ms)} trace_id=${traceId} flushed=${flushed}`
+  ].join("\n");
+}
+
 async function main() {
   const cliArgs = process.argv.slice(2);
   if (cliArgs.length > 0) {
@@ -243,18 +315,23 @@ async function main() {
   await telemetry.flush();
 
   const rl = readline.createInterface({ input, output });
-  output.write("Starcode CLI (type 'exit' to quit).\n");
-  if (modelIoDebugEnabled) {
-    output.write(`model_io_debug=on file=${modelIoFilePath}\n`);
-  }
-  output.write(`streaming=${enableStreaming ? "on" : "off"}\n`);
-  output.write(`planning_mode=${enablePlanningMode ? "on" : "off"}\n`);
-  output.write(`mcp_servers=${runtimeMcpConfig.servers.length}\n`);
-  output.write(`prompt_version=${promptVersion} tool_schema_version=${toolSchemaVersion}\n`);
   output.write(
-    `session_summary=${enableSessionSummary ? "on" : "off"} trigger=${sessionSummaryTriggerMessages} keep_recent=${sessionSummaryKeepRecent}\n`
+    renderStartupPanel({
+      providerName: provider.providerName,
+      model,
+      workspaceDir,
+      enableStreaming,
+      enablePlanningMode,
+      enableSessionSummary,
+      mcpServerCount: runtimeMcpConfig.servers.length,
+      promptVersion,
+      toolSchemaVersion,
+      modelIoDebugEnabled,
+      modelIoFilePath
+    })
   );
-  output.write("Use /help for workflow commands (/fix, /test, /explain, /commit).\n");
+
+  let cumulativeTokens = 0;
 
   while (true) {
     const rawLine = await nextLine(rl);
@@ -308,7 +385,21 @@ async function main() {
       } else {
         output.write(`assistant> ${turn.outputText}\n`);
       }
-      output.write(`trace_id=${turn.traceId} latency_ms=${turn.latencyMs} flushed=${turn.flush.flushed}\n`);
+      const promptTokens = Number(turn.usage?.prompt_tokens ?? 0);
+      const completionTokens = Number(turn.usage?.completion_tokens ?? 0);
+      const totalTokens = Number(turn.usage?.total_tokens ?? promptTokens + completionTokens);
+      cumulativeTokens += Number.isFinite(totalTokens) ? Math.max(0, totalTokens) : 0;
+      output.write(
+        `${renderTurnStats({
+          model,
+          usage: turn.usage,
+          latencyMs: turn.latencyMs,
+          latencyBreakdown: turn.latencyBreakdown,
+          traceId: turn.traceId,
+          flushed: turn.flush.flushed,
+          cumulativeTokens
+        })}\n`
+      );
     } catch (error) {
       output.write(`error> ${error.message}\n`);
     }
