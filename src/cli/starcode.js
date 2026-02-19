@@ -19,6 +19,7 @@ import { PermissionManager } from "../permission/permissionManager.js";
 import { RuntimeApprovalStore } from "../permission/runtimeApprovalStore.js";
 import { SessionStore } from "../session/store.js";
 import { runSessionCommand } from "./sessionCommands.js";
+import { shouldRenderFinalOutputAfterStreaming } from "./outputRendering.js";
 
 const UI_MODES = {
   PLAIN: "plain",
@@ -804,6 +805,7 @@ async function main() {
         output.write(renderTuiHistoricalInputRow({ inputText: line, ansiEnabled }));
       }
       let streamed = false;
+      let streamedText = "";
       const turn = await agent.runTurn(turnInput, {
         stream: enableStreaming,
         planning: enablePlanningMode,
@@ -815,16 +817,28 @@ async function main() {
             output.write(uiMode === UI_MODES.TUI ? "| " : "assistant> ");
             streamed = true;
           }
+          streamedText += chunk;
           output.write(uiMode === UI_MODES.TUI ? chunk.replace(/\n/g, "\n| ") : chunk);
         }
       });
 
       if (streamed) {
         output.write("\n");
-      } else if (uiMode === UI_MODES.TUI) {
-        output.write(`${prefixLines(turn.outputText)}\n`);
-      } else {
-        output.write(`assistant> ${turn.outputText}\n`);
+      }
+
+      const shouldRenderFinalOutput =
+        !streamed ||
+        shouldRenderFinalOutputAfterStreaming({
+          streamedText,
+          finalText: turn.outputText
+        });
+
+      if (shouldRenderFinalOutput) {
+        if (uiMode === UI_MODES.TUI) {
+          output.write(`${prefixLines(turn.outputText)}\n`);
+        } else {
+          output.write(`assistant> ${turn.outputText}\n`);
+        }
       }
 
       const usage = resolveUsage(turn.usage);

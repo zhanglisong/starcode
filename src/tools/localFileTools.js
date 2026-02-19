@@ -7,6 +7,7 @@ const DEFAULT_SHELL_ALLOW_COMMANDS = [
   "cat",
   "cd",
   "cp",
+  "curl",
   "echo",
   "find",
   "git",

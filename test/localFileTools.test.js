@@ -248,6 +248,15 @@ test("execute_shell blocks non-allowlisted command", async () => {
   assert.match(result.blocked_reason, /allowlist/);
 });
 
+test("execute_shell policy allows curl by default", async () => {
+  const dir = await makeTempDir();
+  const tools = new LocalFileTools({ baseDir: dir });
+
+  const policy = tools.evaluateShellPolicy("curl -s https://example.com");
+  assert.equal(policy.allowed, true);
+  assert.equal(policy.executable, "curl");
+});
+
 test("execute_shell blocks denylist command with reason", async () => {
   const dir = await makeTempDir();
   const tools = new LocalFileTools({ baseDir: dir });
