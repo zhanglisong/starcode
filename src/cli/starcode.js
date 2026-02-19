@@ -13,6 +13,7 @@ import { GitContextProvider } from "../context/gitContextProvider.js";
 import { parseSlashCommand, renderSlashHelpText } from "./commandFlows.js";
 import { resolveRuntimeMcpConfig, resolveRuntimeModelConfig, runProviderUtilityCommand } from "./providerAuthCommands.js";
 import { McpManager } from "../mcp/mcpManager.js";
+import { loadHistory, saveHistory } from "./historyStore.js";
 
 function env(name, fallback) {
   const v = process.env[name] ?? fallback;
@@ -130,6 +131,7 @@ function renderStartupPanel({
   enableStreaming,
   enablePlanningMode,
   enableSessionSummary,
+  enableCliHistory,
   mcpServerCount,
   promptVersion,
   toolSchemaVersion,
@@ -142,7 +144,8 @@ function renderStartupPanel({
     "┌─────────────────────────────── Starcode ───────────────────────────────┐",
     `│ model=${modelLabel} provider=${providerLabel} streaming=${enableStreaming ? "on" : "off"} planning=${enablePlanningMode ? "on" : "off"} │`,
     `│ workspace=${workspaceDir} │`,
-    `│ mcp_servers=${mcpServerCount} session_summary=${enableSessionSummary ? "on" : "off"} prompt=${promptVersion} tools=${toolSchemaVersion} │`
+    `│ mcp_servers=${mcpServerCount} session_summary=${enableSessionSummary ? "on" : "off"} history=${enableCliHistory ? "on" : "off"} │`,
+    `│ prompt=${promptVersion} tools=${toolSchemaVersion} │`
   ];
 
   if (modelIoDebugEnabled) {
@@ -268,6 +271,13 @@ async function main() {
   const modelIoFilePath = path.isAbsolute(modelIoFilePathInput)
     ? modelIoFilePathInput
     : path.resolve(workspaceDir, modelIoFilePathInput);
+  const enableCliHistory = process.env.STARCODE_ENABLE_CLI_HISTORY !== "false";
+  const cliHistoryFilePathInput = process.env.STARCODE_CLI_HISTORY_FILE ?? ".telemetry/cli-history.txt";
+  const cliHistoryFilePath = path.isAbsolute(cliHistoryFilePathInput)
+    ? cliHistoryFilePathInput
+    : path.resolve(workspaceDir, cliHistoryFilePathInput);
+  const cliHistoryMaxEntries = Number(process.env.STARCODE_CLI_HISTORY_MAX_ENTRIES ?? 500);
+  let cliHistoryEntries = enableCliHistory ? await loadHistory(cliHistoryFilePath, cliHistoryMaxEntries) : [];
   const modelIoLogger = new ModelIoLogger({
     enabled: modelIoDebugEnabled,
     filePath: modelIoFilePath
@@ -314,7 +324,16 @@ async function main() {
   });
   await telemetry.flush();
 
-  const rl = readline.createInterface({ input, output });
+  const rl = readline.createInterface({
+    input,
+    output,
+    terminal: Boolean(input.isTTY && output.isTTY),
+    historySize: cliHistoryMaxEntries,
+    removeHistoryDuplicates: false
+  });
+  if (enableCliHistory && Array.isArray(rl.history) && cliHistoryEntries.length > 0) {
+    rl.history = [...cliHistoryEntries].reverse();
+  }
   output.write(
     renderStartupPanel({
       providerName: provider.providerName,
@@ -323,6 +342,7 @@ async function main() {
       enableStreaming,
       enablePlanningMode,
       enableSessionSummary,
+      enableCliHistory,
       mcpServerCount: runtimeMcpConfig.servers.length,
       promptVersion,
       toolSchemaVersion,
@@ -347,6 +367,13 @@ async function main() {
 
     if (line === "exit") {
       break;
+    }
+
+    if (enableCliHistory) {
+      cliHistoryEntries.push(line);
+      if (cliHistoryEntries.length > cliHistoryMaxEntries) {
+        cliHistoryEntries = cliHistoryEntries.slice(cliHistoryEntries.length - cliHistoryMaxEntries);
+      }
     }
 
     const slashCommand = parseSlashCommand(line);
@@ -402,6 +429,14 @@ async function main() {
       );
     } catch (error) {
       output.write(`error> ${error.message}\n`);
+    }
+  }
+
+  if (enableCliHistory) {
+    try {
+      await saveHistory(cliHistoryFilePath, cliHistoryEntries, cliHistoryMaxEntries);
+    } catch (error) {
+      output.write(`warn> failed to persist history: ${error.message}\n`);
     }
   }
 
