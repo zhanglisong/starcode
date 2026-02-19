@@ -104,7 +104,7 @@ export function parseSlashCommand(input) {
 
   if (!command) {
     return {
-      kind: "unknown",
+      kind: "menu",
       command,
       args
     };
@@ -147,7 +147,7 @@ export function renderSlashHelpText() {
   const rows = Object.entries(COMMAND_DEFINITIONS)
     .map(([command, definition]) => `/${command} - ${definition.description}`)
     .join("\n");
-  return [`Available slash commands:`, rows, `/status - Show current model/token/latency status.`, `/help - Show this command list.`].join(
+  return [`Slash command choices:`, rows, `/status - Show current model/token/latency status.`, `/help - Show this command list.`].join(
     "\n"
   );
 }

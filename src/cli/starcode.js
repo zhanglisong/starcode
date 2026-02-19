@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import readline from "node:readline/promises";
+import { clearLine, cursorTo, moveCursor } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
 import { TelemetryClient } from "../telemetry/telemetryClient.js";
 import { OpenAICompatibleProvider, MockProvider } from "../providers/openAICompatibleProvider.js";
@@ -14,6 +15,18 @@ import { parseSlashCommand, renderSlashHelpText } from "./commandFlows.js";
 import { resolveRuntimeMcpConfig, resolveRuntimeModelConfig, runProviderUtilityCommand } from "./providerAuthCommands.js";
 import { McpManager } from "../mcp/mcpManager.js";
 import { loadHistory, saveHistory } from "./historyStore.js";
+
+const UI_MODES = {
+  PLAIN: "plain",
+  TUI: "tui"
+};
+
+const ANSI = {
+  reset: "\u001b[0m",
+  bold: "\u001b[1m",
+  dim: "\u001b[2m",
+  reverse: "\u001b[7m"
+};
 
 function env(name, fallback) {
   const v = process.env[name] ?? fallback;
@@ -80,9 +93,113 @@ function createProvider({ providerName, apiKey, endpoint }) {
   });
 }
 
-async function nextLine(rl) {
+function resolveUiMode(value) {
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (raw === UI_MODES.TUI) {
+    return UI_MODES.TUI;
+  }
+  return UI_MODES.PLAIN;
+}
+
+function parseInteractiveCliFlags(args) {
+  const remainingArgs = [];
+  let uiMode = resolveUiMode(process.env.STARCODE_UI ?? UI_MODES.PLAIN);
+
+  for (let i = 0; i < args.length; i += 1) {
+    const token = String(args[i] ?? "");
+    if (token === "--ui") {
+      const next = String(args[i + 1] ?? "");
+      if (!next || next.startsWith("--")) {
+        throw new Error("Missing value for --ui (expected: plain or tui).");
+      }
+      uiMode = resolveUiMode(next);
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("--ui=")) {
+      uiMode = resolveUiMode(token.slice("--ui=".length));
+      continue;
+    }
+    remainingArgs.push(token);
+  }
+
+  return {
+    uiMode,
+    remainingArgs
+  };
+}
+
+function applyStyle(value, code, enabled) {
+  if (!enabled) {
+    return value;
+  }
+  return `${code}${value}${ANSI.reset}`;
+}
+
+function formatBuildDuration(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return "0ms";
+  }
+  if (parsed < 1000) {
+    return `${Math.round(parsed)}ms`;
+  }
+  return `${(parsed / 1000).toFixed(1)}s`;
+}
+
+function prefixLines(value, prefix = "│ ") {
+  const text = String(value ?? "");
+  const lines = text.length ? text.split("\n") : [""];
+  return lines.map((line) => `${prefix}${line}`).join("\n");
+}
+
+function renderTuiStartup({ model, workspaceDir, ansiEnabled }) {
+  const line1 = `${applyStyle("Starcode TUI", ANSI.bold, ansiEnabled)} · ${applyStyle(
+    model || "(unset)",
+    ANSI.dim,
+    ansiEnabled
+  )}`;
+  const line2 = `${applyStyle("workspace", ANSI.dim, ansiEnabled)} ${workspaceDir}`;
+  return `${line1}\n${line2}\n\n`;
+}
+
+function renderTuiTurnFooter({ model, latencyMs, ansiEnabled }) {
+  const duration = formatBuildDuration(latencyMs);
+  const footer = `${applyStyle("▣", ANSI.bold, ansiEnabled)} ${applyStyle("Starcode", ANSI.bold, ansiEnabled)} · ${applyStyle(
+    model || "(unset)",
+    ANSI.dim,
+    ansiEnabled
+  )} · ${applyStyle(duration, ANSI.dim, ansiEnabled)}`;
+  return `\n${footer}\n`;
+}
+
+function renderTuiPromptLabel() {
+  return "❯ ";
+}
+
+function clearSubmittedPromptEchoLine({ uiMode, isTty }) {
+  if (uiMode !== UI_MODES.TUI || !isTty) {
+    return;
+  }
+
   try {
-    return await rl.question("you> ");
+    moveCursor(output, 0, -1);
+    clearLine(output, 0);
+    cursorTo(output, 0);
+  } catch {
+    // Best-effort cleanup for terminal prompt echo.
+  }
+}
+
+function renderTuiHistoricalInputRow({ inputText, ansiEnabled }) {
+  const compactInput = String(inputText ?? "").replace(/\r?\n/g, " ").trim();
+  const row = applyStyle(`❯ ${compactInput}`, ANSI.reverse, ansiEnabled);
+  return `\r \r${row}\n\n`;
+}
+
+async function nextLine(rl, promptLabel = "you> ") {
+  try {
+    return await rl.question(promptLabel);
   } catch (error) {
     if (error?.code === "ERR_USE_AFTER_CLOSE") {
       return null;
@@ -192,17 +309,18 @@ function renderStartupPanel({
   promptVersion,
   toolSchemaVersion,
   modelIoDebugEnabled,
-  modelIoFilePath
+  modelIoFilePath,
+  uiMode
 }) {
   const modelLabel = model && String(model).trim() ? String(model).trim() : "(unset)";
   const providerLabel = providerName && String(providerName).trim() ? String(providerName).trim() : "(unset)";
   const lines = [
     "┌─────────────────────────────── Starcode ───────────────────────────────┐",
-    `│ build · ${modelLabel} · provider=${providerLabel} · streaming=${enableStreaming ? "on" : "off"} · planning=${enablePlanningMode ? "on" : "off"} │`,
+    `│ Starcode · ${modelLabel} · provider=${providerLabel} · streaming=${enableStreaming ? "on" : "off"} · planning=${enablePlanningMode ? "on" : "off"} │`,
     `│ workspace=${workspaceDir} │`,
     `│ context window=${formatTokens(contextWindowTokens)} tokens · pricing(in/out per 1k)=${inputCostPer1k}/${outputCostPer1k} │`,
     `│ mcp_servers=${mcpServerCount} · session_summary=${enableSessionSummary ? "on" : "off"} · history=${enableCliHistory ? "on" : "off"} │`,
-    `│ prompt=${promptVersion} · tools=${toolSchemaVersion} │`
+    `│ prompt=${promptVersion} · tools=${toolSchemaVersion} · ui=${uiMode} │`
   ];
 
   if (modelIoDebugEnabled) {
@@ -237,7 +355,7 @@ function renderTurnStats({
 
   return [
     "stats>",
-    `build · ${modelLabel} · ${providerLabel} · ${formatMs(latencyMs)}`,
+    `Starcode · ${modelLabel} · ${providerLabel} · ${formatMs(latencyMs)}`,
     `context · ${formatTokens(cumulativeTokens)}/${formatTokens(contextWindowTokens)} tokens · ${formatPercent(usedPct)} used · ${formatUsd(cumulativeSpendUsd)} spent`,
     `tokens · turn=${formatTokens(resolvedUsage.promptTokens)}/${formatTokens(resolvedUsage.completionTokens)}/${formatTokens(resolvedUsage.totalTokens)} · session=${formatTokens(cumulativePromptTokens)}/${formatTokens(cumulativeCompletionTokens)}/${formatTokens(cumulativeTokens)} · source=${sourceLabel}`,
     `latency · total/model/tool/other=${formatMs(latencyMs)}/${formatMs(breakdown.model_ms)}/${formatMs(breakdown.tool_ms)}/${formatMs(breakdown.other_ms)}`,
@@ -250,7 +368,7 @@ function renderStatusWithoutTurns({ model, providerName, contextWindowTokens, cu
   const providerLabel = providerName && String(providerName).trim() ? String(providerName).trim() : "(unset)";
   return [
     "stats>",
-    `build · ${modelLabel} · ${providerLabel} · n/a`,
+    `Starcode · ${modelLabel} · ${providerLabel} · n/a`,
     `context · 0/${formatTokens(contextWindowTokens)} tokens · 0% used · ${formatUsd(cumulativeSpendUsd)} spent`,
     "tokens · turn=0/0/0 · session=0/0/0 · source=n/a",
     "latency · total/model/tool/other=0ms/0ms/0ms/0ms",
@@ -259,10 +377,13 @@ function renderStatusWithoutTurns({ model, providerName, contextWindowTokens, cu
 }
 
 async function main() {
-  const cliArgs = process.argv.slice(2);
-  if (cliArgs.length > 0) {
+  const parsedCli = parseInteractiveCliFlags(process.argv.slice(2));
+  const uiMode = parsedCli.uiMode;
+  const ansiEnabled = Boolean(output.isTTY && process.env.NO_COLOR !== "1" && uiMode === UI_MODES.TUI);
+
+  if (parsedCli.remainingArgs.length > 0) {
     const handled = await runProviderUtilityCommand({
-      argv: cliArgs,
+      argv: parsedCli.remainingArgs,
       output,
       errorOutput: process.stderr,
       env: process.env
@@ -270,9 +391,9 @@ async function main() {
     if (handled) {
       return;
     }
-    if (cliArgs[0] === "help" || cliArgs[0] === "--help" || cliArgs[0] === "-h") {
+    if (parsedCli.remainingArgs[0] === "help" || parsedCli.remainingArgs[0] === "--help" || parsedCli.remainingArgs[0] === "-h") {
       output.write("Starcode usage:\n");
-      output.write("  starcode                      # interactive agent mode\n");
+      output.write("  starcode [--ui plain|tui]     # interactive agent mode\n");
       output.write("  starcode auth login <provider> [--api-key <key>] [--endpoint <url>] [--model <id>]\n");
       output.write("  starcode auth logout [provider|--all]\n");
       output.write("  starcode auth list\n");
@@ -285,7 +406,7 @@ async function main() {
       output.write("  starcode mcp disable <id>\n");
       return;
     }
-    throw new Error(`Unknown command '${cliArgs[0]}'. Run 'starcode help' for available commands.`);
+    throw new Error(`Unknown command '${parsedCli.remainingArgs[0]}'. Run 'starcode help' for available commands.`);
   }
 
   const runtimeModelConfig = await resolveRuntimeModelConfig({ env: process.env });
@@ -421,23 +542,30 @@ async function main() {
     rl.history = [...cliHistoryEntries].reverse();
   }
   output.write(
-    renderStartupPanel({
-      providerName: provider.providerName,
-      model,
-      workspaceDir,
-      enableStreaming,
-      enablePlanningMode,
-      enableSessionSummary,
-      enableCliHistory,
-      mcpServerCount: runtimeMcpConfig.servers.length,
-      contextWindowTokens,
-      inputCostPer1k,
-      outputCostPer1k,
-      promptVersion,
-      toolSchemaVersion,
-      modelIoDebugEnabled,
-      modelIoFilePath
-    })
+    uiMode === UI_MODES.TUI
+      ? renderTuiStartup({
+          model,
+          workspaceDir,
+          ansiEnabled
+        })
+      : renderStartupPanel({
+          providerName: provider.providerName,
+          model,
+          workspaceDir,
+          enableStreaming,
+          enablePlanningMode,
+          enableSessionSummary,
+          enableCliHistory,
+          mcpServerCount: runtimeMcpConfig.servers.length,
+          contextWindowTokens,
+          inputCostPer1k,
+          outputCostPer1k,
+          promptVersion,
+          toolSchemaVersion,
+          modelIoDebugEnabled,
+          modelIoFilePath,
+          uiMode
+        })
   );
 
   let cumulativePromptTokens = 0;
@@ -447,7 +575,10 @@ async function main() {
   let latestTurnSnapshot = null;
 
   while (true) {
-    const rawLine = await nextLine(rl);
+    const rawLine = await nextLine(
+      rl,
+      uiMode === UI_MODES.TUI ? renderTuiPromptLabel() : "you> "
+    );
     if (rawLine === null) {
       break;
     }
@@ -470,6 +601,10 @@ async function main() {
     }
 
     const slashCommand = parseSlashCommand(line);
+    if (slashCommand?.kind === "menu") {
+      output.write(`${renderSlashHelpText()}\n`);
+      continue;
+    }
     if (slashCommand?.kind === "help") {
       output.write(`${renderSlashHelpText()}\n`);
       continue;
@@ -513,27 +648,41 @@ async function main() {
 
     try {
       if (slashCommand?.kind === "command") {
-        output.write(`workflow> /${slashCommand.command}${slashCommand.args ? ` ${slashCommand.args}` : ""}\n`);
+        output.write(
+          uiMode === UI_MODES.TUI
+            ? `${applyStyle("workflow", ANSI.dim, ansiEnabled)} /${slashCommand.command}${
+                slashCommand.args ? ` ${slashCommand.args}` : ""
+              }\n`
+            : `workflow> /${slashCommand.command}${slashCommand.args ? ` ${slashCommand.args}` : ""}\n`
+        );
+      }
+      if (uiMode === UI_MODES.TUI) {
+        clearSubmittedPromptEchoLine({ uiMode, isTty: Boolean(output.isTTY) });
+        output.write(renderTuiHistoricalInputRow({ inputText: line, ansiEnabled }));
       }
       let streamed = false;
       const turn = await agent.runTurn(turnInput, {
         stream: enableStreaming,
         planning: enablePlanningMode,
         onPlan: (plan) => {
-          output.write(`${renderPlan(plan)}\n`);
+          output.write(uiMode === UI_MODES.TUI ? `${prefixLines(renderPlan(plan), "│ ")}\n` : `${renderPlan(plan)}\n`);
         },
         onTextDelta: (chunk) => {
           if (!streamed) {
-            output.write("assistant> ");
+            output.write(uiMode === UI_MODES.TUI ? "│ " : "assistant> ");
             streamed = true;
           }
-          output.write(chunk);
+          output.write(uiMode === UI_MODES.TUI ? chunk.replace(/\n/g, "\n│ ") : chunk);
         }
       });
       if (streamed) {
         output.write("\n");
       } else {
-        output.write(`assistant> ${turn.outputText}\n`);
+        if (uiMode === UI_MODES.TUI) {
+          output.write(`${prefixLines(turn.outputText, "│ ")}\n`);
+        } else {
+          output.write(`assistant> ${turn.outputText}\n`);
+        }
       }
       const usage = resolveUsage(turn.usage);
       cumulativePromptTokens += usage.promptTokens;
@@ -552,6 +701,9 @@ async function main() {
         traceId: turn.traceId,
         flushed: turn.flush.flushed
       };
+      if (uiMode === UI_MODES.TUI) {
+        output.write(`${renderTuiTurnFooter({ model, latencyMs: turn.latencyMs, ansiEnabled })}\n`);
+      }
     } catch (error) {
       output.write(`error> ${error.message}\n`);
     }

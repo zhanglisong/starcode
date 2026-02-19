@@ -56,6 +56,15 @@ test("parseSlashCommand returns status sentinel for /status", () => {
   });
 });
 
+test("parseSlashCommand returns menu sentinel for /", () => {
+  const parsed = parseSlashCommand("/");
+  assert.deepEqual(parsed, {
+    kind: "menu",
+    command: "",
+    args: ""
+  });
+});
+
 test("parseSlashCommand returns unknown sentinel for unsupported slash command", () => {
   const parsed = parseSlashCommand("/unknown x");
   assert.deepEqual(parsed, {
