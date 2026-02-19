@@ -725,6 +725,7 @@ test("agent emits round and tool callbacks during tool-call loop", async () => {
   const roundEvents = [];
   const toolStarts = [];
   const toolResults = [];
+  const modelToolCalls = [];
 
   const agent = new StarcodeAgent({
     provider,
@@ -737,12 +738,17 @@ test("agent emits round and tool callbacks during tool-call loop", async () => {
   const result = await agent.runTurn("please create a file", {
     onRound: (event) => roundEvents.push(event),
     onToolStart: (event) => toolStarts.push(event),
-    onToolResult: (event) => toolResults.push(event)
+    onToolResult: (event) => toolResults.push(event),
+    onModelToolCall: (event) => modelToolCalls.push(event)
   });
 
   assert.equal(result.outputText, "Created file successfully.");
   assert.equal(roundEvents.some((event) => event.stage === "start" && event.round === 0), true);
+  assert.equal(roundEvents.some((event) => event.stage === "request_summary" && event.round === 0), true);
   assert.equal(roundEvents.some((event) => event.stage === "model_response" && event.round === 0), true);
+  assert.equal(roundEvents.some((event) => event.stage === "request_summary" && typeof event.summary === "string"), true);
+  assert.equal(modelToolCalls.length >= 1, true);
+  assert.equal(modelToolCalls[0].name, "write_file");
   assert.equal(toolStarts.length >= 1, true);
   assert.equal(toolStarts[0].name, "write_file");
   assert.equal(toolResults.length >= 1, true);

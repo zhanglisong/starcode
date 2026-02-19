@@ -251,11 +251,22 @@ function renderRoundEvent(event) {
     return `round> ${event.round + 1} model finish=${event.finish_reason ?? "unknown"} tool_calls=${event.tool_calls ?? 0}`;
   }
 
+  if (event.stage === "request_summary") {
+    return `round> ${event.round + 1} request ${String(event.summary ?? "").trim()}`;
+  }
+
   if (event.stage === "limit_reached") {
     return `round> tool-call round limit reached at ${event.round + 1}/${(event.max_rounds ?? 0) + 1}`;
   }
 
   return "";
+}
+
+function renderModelToolCallEvent(event) {
+  if (!event || typeof event !== "object") {
+    return "";
+  }
+  return `model> tool_call ${Number(event.index ?? 0) + 1}/${event.total ?? "?"} ${event.name ?? "unknown"} args=${truncateInlineJson(event.arguments)}`;
 }
 
 function renderToolStartEvent(event) {
@@ -968,6 +979,13 @@ async function main() {
         },
         onToolResult: (event) => {
           const line = renderToolResultEvent(event);
+          if (!line) {
+            return;
+          }
+          output.write(uiMode === UI_MODES.TUI ? `${prefixLines(line)}\n` : `${line}\n`);
+        },
+        onModelToolCall: (event) => {
+          const line = renderModelToolCallEvent(event);
           if (!line) {
             return;
           }

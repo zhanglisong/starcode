@@ -119,6 +119,34 @@ function truncateText(value, max = 220) {
   return `${normalized.slice(0, Math.max(0, max - 1))}…`;
 }
 
+function summarizeRequestMessage(message) {
+  if (!message || typeof message !== "object") {
+    return "unknown";
+  }
+
+  const role = String(message.role ?? "unknown");
+  if (role === "assistant" && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+    return `assistant(tool_calls:${message.tool_calls.length})`;
+  }
+  if (role === "tool") {
+    const toolCallId = String(message.tool_call_id ?? "").trim();
+    return toolCallId ? `tool(${toolCallId})` : "tool";
+  }
+
+  const preview = truncateText(message.content, 80);
+  return `${role}:${preview || "[empty]"}`;
+}
+
+function summarizeRoundRequest(messages, maxMessages = 5) {
+  const list = Array.isArray(messages) ? messages : [];
+  const recent = list.slice(Math.max(0, list.length - maxMessages)).map(summarizeRequestMessage);
+  return {
+    message_count: list.length,
+    recent,
+    summary: `messages=${list.length} recent=${recent.join(" | ")}`
+  };
+}
+
 function isSessionSummaryMessage(message) {
   return message?.role === "system" && String(message?.content ?? "").startsWith("Session memory summary:");
 }
@@ -640,6 +668,7 @@ export class StarcodeAgent {
     const onRound = typeof options?.onRound === "function" ? options.onRound : null;
     const onToolStart = typeof options?.onToolStart === "function" ? options.onToolStart : null;
     const onToolResult = typeof options?.onToolResult === "function" ? options.onToolResult : null;
+    const onModelToolCall = typeof options?.onModelToolCall === "function" ? options.onModelToolCall : null;
     const allToolCalls = [];
     const allToolResults = [];
     let latestUsage = {};
@@ -691,6 +720,13 @@ export class StarcodeAgent {
           stage: "start",
           round,
           max_rounds: this.maxToolRounds
+        });
+
+        const requestSummary = summarizeRoundRequest(turnMessages);
+        emitCallback(onRound, {
+          stage: "request_summary",
+          round,
+          ...requestSummary
         });
 
         await this.logModelIo({
@@ -776,6 +812,20 @@ export class StarcodeAgent {
           finish_reason: result.finishReason ?? "unknown",
           tool_calls: Array.isArray(result.toolCalls) ? result.toolCalls.length : 0
         });
+
+        if (Array.isArray(result.toolCalls) && result.toolCalls.length > 0) {
+          for (let i = 0; i < result.toolCalls.length; i += 1) {
+            const call = result.toolCalls[i];
+            emitCallback(onModelToolCall, {
+              round,
+              index: i,
+              total: result.toolCalls.length,
+              tool_call_id: call?.id ?? null,
+              name: call?.function?.name ?? "unknown",
+              arguments: parseToolArguments(call?.function?.arguments)
+            });
+          }
+        }
 
         if (!result.toolCalls?.length || (!this.localTools && !this.mcpManager)) {
           const assistantMessage = buildAssistantMessageFromResult(result, false);
